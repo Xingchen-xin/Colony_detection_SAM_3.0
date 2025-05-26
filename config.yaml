@@ -7,17 +7,17 @@
 detection: 
   model_type: vit_b              # SAM模型类型: vit_b, vit_l, vit_h
   mode: auto                     # 检测模式: auto, grid, hybrid
-  min_colony_area: 5000          # 最小菌落面积
-  expand_pixels: 8               # 掩码扩展像素数
+  min_colony_area: 1000         # 最小菌落面积
+  expand_pixels: 2               # 掩码扩展像素数
   merge_overlapping: true        # 是否合并重叠菌落
   use_preprocessing: true        # 是否使用图像预处理
-  overlap_threshold: 0.3         # 重叠阈值
+  overlap_threshold: 0.05         # 重叠阈值
 
 sam: 
   points_per_side: 64            # 每边采样点数
   pred_iou_thresh: 0.85          # IoU阈值
   stability_score_thresh: 0.8    # 稳定性分数阈值
-  min_mask_region_area: 1500     # 最小掩码区域面积
+  min_mask_region_area: 100     # 最小掩码区域面积
   crop_n_layers: 1               # 裁剪层数
   crop_n_points_downscale_factor: 1  # 下采样因子
 

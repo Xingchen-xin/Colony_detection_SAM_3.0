@@ -111,9 +111,8 @@ class ResultManager:
 
         logging.info(f"CSV结果已保存: {csv_path}")
         return csv_path
-    import numpy as np
 
-    def convert_to_serializable(obj):
+    def convert_to_serializable(self, obj):
         """递归将数据转换为可序列化的格式"""
         if isinstance(obj, np.integer):
             return int(obj)
@@ -123,19 +122,15 @@ class ResultManager:
             return obj.tolist()
         elif isinstance(obj, dict):
             # 遍历字典并递归处理每个值
-            return {k: convert_to_serializable(v) for k, v in obj.items()}
+            return {k: self.convert_to_serializable(v) for k, v in obj.items()}
         elif isinstance(obj, list):
             # 遍历列表并递归处理每个元素
-            return [convert_to_serializable(i) for i in obj]
+            return [self.convert_to_serializable(i) for i in obj]
         else:
             # 对于其他类型，直接返回
             return obj
 
-    def save_json_results(colonies):
-        serializable_data = convert_to_serializable(colonies)
-        with open('output/results/analysis_results.json', 'w', encoding='utf-8') as f:
-            json.dump(serializable_data, f, indent=2, ensure_ascii=False)
-
+    def save_json_results(self, colonies):
         """保存JSON格式的详细结果"""
         serializable_data = []
 
@@ -159,15 +154,12 @@ class ResultManager:
                     'sam_score': colony.get('sam_score', 0.0)
                 }
             }
-
             serializable_data.append(colony_data)
 
-        # 保存JSON
         json_path = self.directories['results'] / 'detailed_results.json'
         try:
             with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(serializable_data, f, indent=2, ensure_ascii=False)
-
         except Exception as e:
             logging.error(f"保存 JSON 文件失败: {e}")
 

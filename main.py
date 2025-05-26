@@ -64,8 +64,8 @@ def parse_arguments():
     # 配置参数
     parser.add_argument('--config', type=str,
                         help='配置文件路径')
-    parser.add_argument('--min-area', type=int, default=5000,
-                        help='最小菌落面积 (默认: 5000)')
+    parser.add_argument('--min-area', type=int, default=2000,
+                        help='最小菌落面积 (默认: 2000)')
 
     return parser.parse_args()
 

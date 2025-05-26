@@ -16,11 +16,11 @@ from ..utils.validation import ImageValidator, DataValidator
 class DetectionConfig:
     """检测配置数据类"""
     mode: str = 'auto'
-    min_colony_area: int = 5000
-    expand_pixels: int = 8
+    min_colony_area: int = 2000
+    expand_pixels: int = 2
     merge_overlapping: bool = True
     use_preprocessing: bool = True
-    overlap_threshold: float = 0.3
+    overlap_threshold: float = 0.05
 
 
 class ColonyDetector:
