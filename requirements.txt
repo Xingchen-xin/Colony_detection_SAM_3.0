@@ -1,0 +1,53 @@
+# ============================================================================
+# 14. requirements.txt
+# ============================================================================
+
+# Colony Detection SAM 2.0 依赖包
+
+# 核心依赖
+torch>=1.7.1
+torchvision>=0.8.2
+numpy>=1.19.2
+opencv-python>=4.5.1
+pillow>=8.0.0
+
+# SAM依赖
+segment-anything
+git+https://github.com/facebookresearch/segment-anything.git
+
+# 图像处理
+scikit-image>=0.18.1
+scipy>=1.6.0
+
+# 数据处理和分析
+pandas>=1.2.0
+scikit-learn>=0.24.1
+
+# 可视化
+matplotlib>=3.3.3
+seaborn>=0.11.1
+
+# 配置文件处理
+pyyaml>=5.4.1
+
+# 进度显示
+tqdm>=4.56.0
+
+# 并行处理
+joblib>=1.0.0
+
+# 测试框架
+pytest>=6.0.0
+pytest-cov>=2.10.0
+
+# 代码质量
+black>=21.0.0
+flake8>=3.8.0
+isort>=5.7.0
+
+# 类型检查
+mypy>=0.800
+
+# 文档生成
+sphinx>=3.4.0
+sphinx-rtd-theme>=0.5.0

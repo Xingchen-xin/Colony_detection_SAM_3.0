@@ -1,0 +1,133 @@
+# ============================================================================
+# 17. .gitignore
+# ============================================================================
+
+GITIGNORE = """# Colony Detection SAM 2.0 - Git忽略文件
+
+# Python缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# 虚拟环境
+venv/
+env/
+ENV/
+.venv/
+.env/
+.ENV/
+conda-env/
+
+# IDE和编辑器
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.spyderproject
+.spyproject
+.ropeproject
+*.swp
+*.swo
+*~
+
+# 操作系统文件
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# 日志文件
+*.log
+logs/
+*.out
+
+# 模型文件（通常很大，需要单独管理）
+models/*.pth
+models/*.onnx
+models/*.pb
+models/*.pt
+models/*.h5
+models/*.pkl
+!models/.gitkeep
+
+# 输出目录
+output/
+results/
+debug/
+temp/
+tmp/
+
+# 数据文件
+data/
+*.csv
+*.xlsx
+*.json
+!config.yaml
+!requirements.txt
+
+# 图像文件（示例图像除外）
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+*.bmp
+!examples/images/.gitkeep
+
+# 测试覆盖率报告
+htmlcov/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+coverage.xml
+*.cover
+.hypothesis/
+
+# 文档生成
+_build/
+.doctrees/
+docs/_build/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# 配置文件备份
+config.yaml.bak
+config.json.bak
+settings.ini.bak
+
+# 临时文件
+*.tmp
+*.temp
+.temporary/
+
+# 压缩文件
+*.zip
+*.tar.gz
+*.rar
+*.7z
+"""
