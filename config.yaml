@@ -6,18 +6,19 @@
 
 detection: 
   model_type: vit_b              # SAM模型类型: vit_b, vit_l, vit_h
-  mode: auto                     # 检测模式: auto, grid, hybrid
-  min_colony_area: 1000         # 最小菌落面积
+  mode:auto                     # 检测模式: auto, grid, hybrid
+  min_colony_area: 500         # 最小菌落面积
+  max_colony_area: 50000   # 最大菌落面积
   expand_pixels: 2               # 掩码扩展像素数
   merge_overlapping: true        # 是否合并重叠菌落
   use_preprocessing: true        # 是否使用图像预处理
-  overlap_threshold: 0.05         # 重叠阈值
+  overlap_threshold: 0.3         # 重叠阈值
 
 sam: 
   points_per_side: 64            # 每边采样点数
-  pred_iou_thresh: 0.85          # IoU阈值
-  stability_score_thresh: 0.8    # 稳定性分数阈值
-  min_mask_region_area: 100     # 最小掩码区域面积
+  pred_iou_thresh: 0.75          # IoU阈值
+  stability_score_thresh: 0.65    # 稳定性分数阈值
+  min_mask_region_area: 50     # 最小掩码区域面积
   crop_n_layers: 1               # 裁剪层数
   crop_n_points_downscale_factor: 1  # 下采样因子
 
@@ -30,7 +31,7 @@ analysis:
   max_workers: 4                 # 最大工作线程数
 
 output: 
-  debug: false                   # 是否生成调试输出
+  debug: true                   # 是否生成调试输出
   well_plate: false              # 是否使用孔板编号
   rows: 8                        # 孔板行数
   cols: 12                       # 孔板列数
@@ -39,7 +40,7 @@ output:
   image_format: jpg              # 图像输出格式
 
 logging: 
-  level: INFO                    # 日志级别: DEBUG, INFO, WARNING, ERROR
+  level: DEBUG                    # 日志级别: DEBUG, INFO, WARNING, ERROR
   log_to_file: true              # 是否记录到文件
   log_dir: null                  # 日志目录 (null = 自动)
   max_log_files: 10              # 最大日志文件数
