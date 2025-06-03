@@ -88,6 +88,16 @@ class ColonyAnalyzer:
         if advanced and self.sam_model is not None:
             self._perform_advanced_analysis(colony)
 
+        # 使用质量分数进行加权
+        quality = colony.get('quality_score', 0.5)
+        if quality < 0.3:
+            logging.warning(f"低质量菌落: {colony['id']}")
+
+        # 处理跨界情况
+        if colony.get('cross_boundary', False):
+            colony['phenotype']['special_case'] = 'cross_boundary'
+            colony['phenotype']['affected_wells'] = colony.get(
+            'overlapping_wells', [])
         return colony
 
     def _perform_advanced_analysis(self, colony: Dict):

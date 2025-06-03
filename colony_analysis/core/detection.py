@@ -2,6 +2,9 @@
 # 6. colony_analysis/core/detection.py - 菌落检测器
 # ============================================================================
 
+# colony_analysis/core/detection.py - 增量更新版本
+# 保留原有的基础函数，只更新和添加需要的部分
+
 import cv2
 import numpy as np
 import logging
@@ -12,22 +15,52 @@ from .sam_model import SAMModel
 from ..utils.validation import ImageValidator, DataValidator
 
 
+# ✅ 更新数据类 - 添加新字段到现有的DetectionConfig
 @dataclass
 class DetectionConfig:
-    """检测配置数据类 - 修复版本"""
+    """检测配置数据类 - 完整版"""
     mode: str = 'auto'
-    min_colony_area: int = 500         # 降低最小面积
-    max_colony_area: int = 50000       # 🔥 新增：最大面积限制
+    min_colony_area: int = 500
+    max_colony_area: int = 50000
     expand_pixels: int = 2
     merge_overlapping: bool = True
     use_preprocessing: bool = True
     overlap_threshold: float = 0.3
-    background_filter: bool = True      # 🔥 新增：背景过滤
+    background_filter: bool = True
+
+    # 混合模式专用参数
+    enable_multi_stage: bool = True
+    high_quality_threshold: float = 0.8
+    supplementary_threshold: float = 0.65
+    max_background_ratio: float = 0.2
+    edge_contact_limit: float = 0.3
+    shape_regularity_min: float = 0.2
+
+    # 去重相关参数
+    duplicate_centroid_threshold: float = 50.0  # 中心点距离阈值
+    duplicate_overlap_threshold: float = 0.6     # 边界框重叠阈值
+    enable_duplicate_merging: bool = False       # 是否启用信息合并
+      # 增强功能开关
+    enable_adaptive_grid: bool = True      # 启用自适应网格调整
+    sort_by_quality: bool = True           # 按质量分数排序结果
+    min_quality_score: float = 0.3          # 最低质量分数阈值
+  
+    # Hybrid模式参数
+    min_colonies_expected: int = 30       # 预期最少菌落数
+    max_mapping_distance: float = 0.4       # 最大映射距离（相对于孔位大小）
+    supplement_score_threshold: float = 0.5 # 补充检测的分数阈值
+    edge_margin_ratio: float = 0.08         # 边缘边距比例
+  
+    # 跨界处理参数
+    cross_boundary_overlap_threshold: float = 0.1  # 跨界判定的重叠阈值
+    mark_cross_boundary: bool = True              # 是否标记跨界菌落
+
+
 
 
 class ColonyDetector:
     """统一的菌落检测器"""
-
+    # base class for colony detection, integrating SAMModel and configuration management
     def __init__(self, sam_model: SAMModel, config=None):
         """初始化菌落检测器"""
         self.sam_model = sam_model
@@ -42,14 +75,10 @@ class ColonyDetector:
         detection_params = {}
         detection_obj = config.get('detection')
         if hasattr(detection_obj, '__dict__'):
-            detection_params = {
-                'mode': detection_obj.mode,
-                'min_colony_area': detection_obj.min_colony_area,
-                'expand_pixels': detection_obj.expand_pixels,
-                'merge_overlapping': detection_obj.merge_overlapping,
-                'use_preprocessing': detection_obj.use_preprocessing,
-                'overlap_threshold': detection_obj.overlap_threshold
-            }
+            # 提取所有可用的参数
+            for field in DetectionConfig.__dataclass_fields__:
+                if hasattr(detection_obj, field):
+                    detection_params[field] = getattr(detection_obj, field)
 
         return DetectionConfig(**detection_params)
 
@@ -82,6 +111,7 @@ class ColonyDetector:
         logging.info(f"检测完成，发现 {len(colonies)} 个菌落")
         return colonies
 
+    #preprocess_image
     def _preprocess_image(self, img_rgb: np.ndarray) -> np.ndarray:
         """预处理图像"""
         if not self.config.use_preprocessing:
@@ -103,6 +133,7 @@ class ColonyDetector:
 
         return processed_img
 
+    #three detection modes
     def _detect_auto_mode(self, img: np.ndarray) -> List[Dict]:
         """自动检测模式 - 修复版本"""
         logging.info("使用自动检测模式...")
@@ -170,110 +201,66 @@ class ColonyDetector:
                      f"有效={filtered_counts['valid']}")
 
         return colonies
-
-    def _is_background_region(self, mask: np.ndarray, img: np.ndarray) -> bool:
-        """检测是否为背景区域 - 新增方法"""
-        try:
-            # 方法1: 检查是否接触图像边缘
-            h, w = mask.shape
-            edge_pixels = np.sum(mask[0, :]) + np.sum(mask[-1, :]) + \
-                np.sum(mask[:, 0]) + np.sum(mask[:, -1])
-
-            if edge_pixels > np.sum(mask) * 0.1:  # 超过10%像素在边缘
-                logging.debug("背景检测: 大量边缘像素")
-                return True
-
-            # 方法2: 检查掩码的形状特征
-            y_indices, x_indices = np.where(mask)
-            if len(y_indices) == 0:
-                return True
-
-            # 计算边界框面积比
-            minr, maxr = np.min(y_indices), np.max(y_indices)
-            minc, maxc = np.min(x_indices), np.max(x_indices)
-            bbox_area = (maxr - minr + 1) * (maxc - minc + 1)
-            mask_area = np.sum(mask)
-
-            fill_ratio = mask_area / bbox_area if bbox_area > 0 else 0
-
-            # 如果填充比例很低，可能是分散的背景噪声
-            if fill_ratio < 0.3:
-                logging.debug(f"背景检测: 填充比例过低 {fill_ratio:.3f}")
-                return True
-
-            # 方法3: 检查是否覆盖了太大比例的图像
-            img_area = h * w
-            if mask_area > img_area * 0.5:  # 超过图像50%
-                logging.debug(f"背景检测: 覆盖面积过大 {mask_area/img_area:.3f}")
-                return True
-
-            return False
-
-        except Exception as e:
-            logging.error(f"背景检测出错: {e}")
-            return False
-
-    def _filter_overlapping_colonies(self, colonies: List[Dict]) -> List[Dict]:
-        """改进的重叠过滤 - 修复版本"""
-        if len(colonies) <= 1:
-            return colonies
-
-        logging.info(f"重叠过滤前: {len(colonies)} 个菌落")
-
-        # 🔥 修复：先按面积排序，优先保留中等大小的菌落
-        # 而不是最大的（可能是背景）
-        def get_priority_score(colony):
-            area = colony['area']
-            # 给中等大小的菌落更高的优先级
-            if 1000 <= area <= 20000:  # 理想菌落大小范围
-                return area + 100000  # 提高优先级
-            else:
-                return area
-
-        sorted_colonies = sorted(
-            colonies, key=get_priority_score, reverse=True)
-
-        filtered_colonies = []
-        used_regions = []
-        overlap_count = 0
-
-        for i, colony in enumerate(sorted_colonies):
-            bbox = colony['bbox']
-            colony_id = colony.get('id', f'colony_{i}')
-            area = colony['area']
-
-            # 🔥 新增：直接跳过异常大的区域
-            img_area = 1074 * 1607  # 从调试信息获得的图像大小
-            if area > img_area * 0.3:  # 超过图像30%的区域直接跳过
-                logging.warning(f"跳过异常大区域 {colony_id}: 面积={area}")
-                overlap_count += 1
-                continue
-
-            # 检查重叠
-            is_overlapping = False
-            max_overlap = 0.0
-
-            for j, used_bbox in enumerate(used_regions):
-                overlap = self._calculate_bbox_overlap(bbox, used_bbox)
-                max_overlap = max(max_overlap, overlap)
-
-                if overlap > self.config.overlap_threshold:
-                    is_overlapping = True
-                    logging.debug(f"菌落 {colony_id} 与菌落 {j} 重叠 {overlap:.3f}")
-                    break
-
-            if not is_overlapping:
-                filtered_colonies.append(colony)
-                used_regions.append(bbox)
-                logging.debug(
-                    f"✓ 保留菌落 {colony_id}, 面积={area}, 最大重叠={max_overlap:.3f}")
-            else:
-                overlap_count += 1
-
-        logging.info(
-            f"重叠过滤：{len(colonies)} -> {len(filtered_colonies)} (移除 {overlap_count} 个)")
-        return filtered_colonies
     
+    def _detect_hybrid_mode(self, img: np.ndarray) -> List[Dict]:
+        """改进的混合检测模式 - 集成增强功能"""
+        logging.info("使用改进的混合检测模式...")
+
+        # Step 1: 使用auto模式精确检测菌落
+        auto_colonies = self._detect_auto_mode_refined(img)
+        logging.info(f"Auto检测到 {len(auto_colonies)} 个菌落")
+
+        # Step 2: 创建孔板网格映射
+        plate_grid = self._create_plate_grid(img.shape[:2])
+
+        # Step 2.5: 【新增】自适应调整网格（如果启用）
+        if hasattr(self.config, 'enable_adaptive_grid') and self.config.enable_adaptive_grid:
+            # 先做一次初步映射
+            temp_mapped = self._map_colonies_to_wells(
+                auto_colonies.copy(), plate_grid)
+            # 根据映射结果调整网格
+            plate_grid = self._adaptive_grid_adjustment(
+                img, plate_grid, temp_mapped)
+            logging.info("已根据检测结果调整网格位置")
+
+        # Step 3: 将检测到的菌落映射到最近的孔位
+        mapped_colonies = self._map_colonies_to_wells(
+            auto_colonies, plate_grid)
+
+        # Step 3.5: 【新增】处理跨界菌落
+        mapped_colonies = self._cross_boundary_colony_handling(
+            mapped_colonies, plate_grid)
+
+        # Step 4: 补充检测遗漏的孔位
+        if len(mapped_colonies) < self.config.min_colonies_expected:
+            supplemented = self._supplement_missing_wells(
+                img, mapped_colonies, plate_grid)
+            mapped_colonies.extend(supplemented)
+
+        # Step 5: 【新增】计算质量分数
+        for colony in mapped_colonies:
+            self._quality_score_adjustment(colony)
+
+        # Step 6: 【新增】根据质量分数排序（可选）
+        if hasattr(self.config, 'sort_by_quality') and self.config.sort_by_quality:
+            mapped_colonies.sort(key=lambda x: x.get(
+                'quality_score', 0), reverse=True)
+
+        logging.info(f"最终检测到 {len(mapped_colonies)} 个菌落")
+        if self.config.enable_multi_stage:
+            mapped_colonies = self._remove_duplicates(mapped_colonies)
+        # 统计信息
+        cross_boundary_count = sum(
+            1 for c in mapped_colonies if c.get('cross_boundary', False))
+        if cross_boundary_count > 0:
+            logging.info(f"其中 {cross_boundary_count} 个菌落跨越孔位边界")
+
+        avg_quality = np.mean([c.get('quality_score', 0.5)
+                              for c in mapped_colonies])
+        logging.info(f"平均质量分数: {avg_quality:.3f}")
+
+        return mapped_colonies
+
     def _detect_grid_mode(self, img: np.ndarray) -> List[Dict]:
         """网格检测模式"""
         logging.info("使用网格检测模式...")
@@ -296,185 +283,7 @@ class ColonyDetector:
 
         return colonies
 
-    def _detect_hybrid_mode(self, img: np.ndarray) -> List[Dict]:
-        """混合检测模式"""
-        logging.info("使用混合检测模式...")
-
-        # 先尝试自动检测
-        auto_colonies = self._detect_auto_mode(img)
-
-        # 如果检测结果太少，补充网格检测
-        if len(auto_colonies) < 10:
-            grid_colonies = self._detect_grid_mode(img)
-            all_colonies = auto_colonies + grid_colonies
-            return self._remove_duplicates(all_colonies)
-
-        return auto_colonies
-
-    def _enhance_colony_mask(self, mask: np.ndarray) -> np.ndarray:
-        """增强菌落掩码形状"""
-        if np.sum(mask) == 0:
-            return mask
-
-        # 找到质心
-        y_indices, x_indices = np.where(mask)
-        center_y, center_x = np.mean(y_indices), np.mean(x_indices)
-
-        # 计算等效半径
-        area = np.sum(mask)
-        equiv_radius = np.sqrt(area / np.pi)
-
-        # 创建圆形扩展掩码
-        h, w = mask.shape
-        y_grid, x_grid = np.ogrid[:h, :w]
-        dist_from_center = np.sqrt(
-            (y_grid - center_y)**2 + (x_grid - center_x)**2)
-
-        # 创建平滑的圆形掩码
-        expanded_mask = dist_from_center <= (
-            equiv_radius + self.config.expand_pixels)
-
-        # 结合原始掩码
-        enhanced_mask = np.logical_or(mask, expanded_mask)
-
-        return enhanced_mask.astype(np.uint8)
-
-    def _extract_colony_data(self, img: np.ndarray, mask: np.ndarray,
-                             colony_id: str, detection_method: str = 'sam') -> Dict:
-        """从图像和掩码中提取菌落数据"""
-        # 计算边界框
-        y_indices, x_indices = np.where(mask)
-        if len(y_indices) == 0:
-            return None
-
-        minr, minc = np.min(y_indices), np.min(x_indices)
-        maxr, maxc = np.max(y_indices) + 1, np.max(x_indices) + 1
-
-        # 提取菌落图像和掩码
-        colony_img = img[minr:maxr, minc:maxc].copy()
-        colony_mask = mask[minr:maxr, minc:maxc]
-
-        # 创建掩码应用的图像
-        masked_img = np.zeros_like(colony_img)
-        masked_img[colony_mask > 0] = colony_img[colony_mask > 0]
-
-        # 计算基本属性
-        area = float(np.sum(mask))
-        centroid = (float(np.mean(y_indices)), float(np.mean(x_indices)))
-
-        return {
-            'id': colony_id,
-            'bbox': (minr, minc, maxr, maxc),
-            'area': area,
-            'centroid': centroid,
-            'mask': colony_mask,
-            'img': colony_img,
-            'masked_img': masked_img,
-            'detection_method': detection_method
-        }
-
-    def _post_process_colonies(self, colonies: List[Dict]) -> List[Dict]:
-        """后处理菌落列表"""
-        if not colonies:
-            return colonies
-
-        # 验证菌落数据
-        valid_colonies = []
-        for colony in colonies:
-            is_valid, error_msg = DataValidator.validate_colony(colony)
-            if is_valid:
-                valid_colonies.append(colony)
-            else:
-                logging.debug(f"移除无效菌落: {error_msg}")
-
-        # 过滤重叠菌落
-        if self.config.merge_overlapping and len(valid_colonies) > 1:
-            valid_colonies = self._filter_overlapping_colonies(valid_colonies)
-
-        return valid_colonies
-
-    def _filter_overlapping_colonies(self, colonies: List[Dict]) -> List[Dict]:
-        """过滤重叠的菌落"""
-        if len(colonies) <= 1:
-            return colonies
-
-        # 按面积排序，保留较大的菌落
-        sorted_colonies = sorted(
-            colonies, key=lambda x: x['area'], reverse=True)
-
-        filtered_colonies = []
-        used_regions = []
-
-        for colony in sorted_colonies:
-            bbox = colony['bbox']
-
-            # 检查是否与已使用区域重叠
-            is_overlapping = False
-            for used_bbox in used_regions:
-                if self._calculate_bbox_overlap(bbox, used_bbox) > self.config.overlap_threshold:
-                    is_overlapping = True
-                    break
-
-            if not is_overlapping:
-                filtered_colonies.append(colony)
-                used_regions.append(bbox)
-
-        logging.info(f"重叠过滤：{len(colonies)} -> {len(filtered_colonies)}")
-        return filtered_colonies
-
-    def _calculate_bbox_overlap(self, bbox1: Tuple, bbox2: Tuple) -> float:
-        """计算两个边界框的重叠比例"""
-        minr1, minc1, maxr1, maxc1 = bbox1
-        minr2, minc2, maxr2, maxc2 = bbox2
-
-        # 计算重叠区域
-        overlap_minr = max(minr1, minr2)
-        overlap_minc = max(minc1, minc2)
-        overlap_maxr = min(maxr1, maxr2)
-        overlap_maxc = min(maxc1, maxc2)
-
-        # 检查是否有重叠
-        if overlap_minr >= overlap_maxr or overlap_minc >= overlap_maxc:
-            return 0.0
-
-        # 计算重叠面积和比例
-        overlap_area = (overlap_maxr - overlap_minr) * \
-            (overlap_maxc - overlap_minc)
-        area1 = (maxr1 - minr1) * (maxc1 - minc1)
-        area2 = (maxr2 - minr2) * (maxc2 - minc2)
-
-        return overlap_area / min(area1, area2)
-
-    def _remove_duplicates(self, colonies: List[Dict]) -> List[Dict]:
-        """移除重复的菌落"""
-        # 简单的重复检测逻辑
-        return colonies
-    
-# colony_analysis/core/detection.py - 改进的混合检测
-
-
-# class ColonyDetector:
-    """改进的菌落检测器 - 解决grid和auto模式问题"""
-
-    def _detect_hybrid_mode(self, img: np.ndarray) -> List[Dict]:
-        """改进的混合检测模式：先auto检测，再映射到孔位"""
-        logging.info("使用改进的混合检测模式...")
-
-        # Step 1: 使用auto模式精确检测菌落
-        auto_colonies = self._detect_auto_mode_refined(img)
-        logging.info(f"Auto检测到 {len(auto_colonies)} 个菌落")
-
-        # Step 2: 创建孔板网格映射
-        plate_grid = self._create_plate_grid(img.shape[:2])
-        logging.info(f"创建了 {len(plate_grid)} 个孔位网格")
-
-        # Step 3: 将检测到的菌落映射到最近的孔位
-        mapped_colonies = self._map_colonies_to_wells(
-            auto_colonies, plate_grid)
-        logging.info(f"成功映射 {len(mapped_colonies)} 个菌落到孔位")
-
-        return mapped_colonies
-
+    #Hybird detection methods
     def _detect_auto_mode_refined(self, img: np.ndarray) -> List[Dict]:
         """改进的auto检测：专门针对孔板优化"""
         logging.info("使用孔板优化的auto检测...")
@@ -641,6 +450,156 @@ class ColonyDetector:
             logging.info(f"空孔位: {sorted(missing_wells)}")
 
         return mapped_colonies
+    
+    def _cross_boundary_colony_handling(self, colonies: List[Dict],
+                                            grid_info: Dict) -> List[Dict]:
+        """
+        处理跨越孔位边界的菌落
+        
+        使用场景：在孔位映射后调用，标记和处理跨界情况
+        """
+        for colony in colonies:
+            bbox = colony['bbox']
+            overlapping_wells = []
+            overlap_ratios = {}
+
+            for well_id, info in grid_info.items():
+                well_bbox = info.get('expected_bbox', info.get('bbox'))
+                if not well_bbox:
+                    continue
+
+                overlap = self._calculate_bbox_overlap(bbox, well_bbox)
+                if overlap > 0.1:  # 10%以上的重叠
+                    overlapping_wells.append(well_id)
+                    overlap_ratios[well_id] = overlap
+
+            if len(overlapping_wells) > 1:
+                # 标记为跨界菌落
+                colony['cross_boundary'] = True
+                colony['overlapping_wells'] = overlapping_wells
+                colony['overlap_ratios'] = overlap_ratios
+
+                # 选择重叠最大的孔位作为主要归属
+                if not colony.get('well_position') or colony['well_position'].startswith('unmapped'):
+                    primary_well = max(overlap_ratios.items(),
+                                       key=lambda x: x[1])[0]
+                    colony['well_position'] = primary_well
+                    colony['id'] = f"{primary_well}_cross"
+
+                logging.warning(
+                    f"检测到跨界菌落: {colony['id']} 跨越 {overlapping_wells}")
+            else:
+                colony['cross_boundary'] = False
+
+        return colonies
+
+    def _supplement_missing_wells(self, img: np.ndarray, existing: List[Dict],
+                                      grid_info: Dict[str, Dict]) -> List[Dict]:
+        """补充检测遗漏的孔位"""
+        used_wells = {c.get('well_position') for c in existing
+                    if c.get('well_position') and not c['well_position'].startswith('unmapped')}
+        missing_wells = set(grid_info.keys()) - used_wells
+
+        if not missing_wells or len(missing_wells) > 50:  # 太多空位说明可能有问题
+            return []
+
+        logging.info(f"尝试补充检测 {len(missing_wells)} 个空孔位")
+
+        supplemented = []
+        for well_id in list(missing_wells)[:20]:  # 最多补充20个
+            info = grid_info[well_id]
+            bbox = info['expected_bbox']
+
+            try:
+                # 在孔位中心使用点提示
+                center_y, center_x = info['center']
+                points = [[center_x, center_y]]
+
+                mask, score = self.sam_model.segment_with_prompts(
+                    img, points=points, point_labels=[1]
+                )
+
+                if score > 0.5 and np.sum(mask) > self.config.min_colony_area // 2:
+                    colony_data = self._extract_colony_data(
+                        img, mask, well_id, 'hybrid_supplement'
+                    )
+
+                    if colony_data:
+                        colony_data['well_position'] = well_id
+                        colony_data['id'] = well_id
+                        colony_data['row'] = info['row']
+                        colony_data['col'] = info['col']
+                        colony_data['sam_score'] = float(score)
+                        supplemented.append(colony_data)
+
+            except Exception as e:
+                logging.debug(f"补充检测 {well_id} 失败: {e}")
+                continue
+
+        logging.info(f"成功补充检测 {len(supplemented)} 个菌落")
+        return supplemented
+
+    def _adaptive_grid_adjustment(self, img: np.ndarray, initial_grid: Dict,
+                                      detected_colonies: List[Dict]) -> Dict:
+        """
+        自适应网格调整 - 根据检测结果微调网格位置
+        
+        使用场景：当检测到的菌落普遍偏离预设网格中心时
+        """
+        if len(detected_colonies) < 10:  # 样本太少，不调整
+            return initial_grid
+
+        # 计算整体偏移
+        total_offset_y = 0
+        total_offset_x = 0
+        valid_mappings = 0
+
+        for colony in detected_colonies:
+            if 'well_position' not in colony or colony['well_position'].startswith('unmapped'):
+                continue
+
+            well_id = colony['well_position']
+            if well_id not in initial_grid:
+                continue
+
+            # 计算实际位置与网格中心的偏差
+            expected_center = initial_grid[well_id]['center']
+            actual_center = colony['centroid']
+
+            offset_y = actual_center[0] - expected_center[0]
+            offset_x = actual_center[1] - expected_center[1]
+
+            # 只统计合理范围内的偏移
+            if abs(offset_y) < 50 and abs(offset_x) < 50:
+                total_offset_y += offset_y
+                total_offset_x += offset_x
+                valid_mappings += 1
+
+        if valid_mappings < 5:  # 有效映射太少
+            return initial_grid
+
+        # 计算平均偏移
+        avg_offset_y = total_offset_y / valid_mappings
+        avg_offset_x = total_offset_x / valid_mappings
+
+        # 如果偏移显著，调整网格
+        if abs(avg_offset_y) > 10 or abs(avg_offset_x) > 10:
+            logging.info(
+                f"检测到网格偏移: Y={avg_offset_y:.1f}, X={avg_offset_x:.1f}")
+
+            adjusted_grid = {}
+            for well_id, info in initial_grid.items():
+                adjusted_info = info.copy()
+                old_center = info['center']
+                adjusted_info['center'] = (
+                    old_center[0] + avg_offset_y,
+                    old_center[1] + avg_offset_x
+                )
+                adjusted_grid[well_id] = adjusted_info
+
+            return adjusted_grid
+
+        return initial_grid
 
     def _is_reasonable_colony_shape(self, mask: np.ndarray) -> bool:
         """检查菌落形状是否合理"""
@@ -691,3 +650,505 @@ class ColonyDetector:
         except Exception as e:
             logging.error(f"形状检查出错: {e}")
             return False
+
+
+
+    #tools and methods
+    def _enhance_colony_mask(self, mask: np.ndarray) -> np.ndarray:
+        """增强菌落掩码形状"""
+        if np.sum(mask) == 0:
+            return mask
+
+        # 找到质心
+        y_indices, x_indices = np.where(mask)
+        center_y, center_x = np.mean(y_indices), np.mean(x_indices)
+
+        # 计算等效半径
+        area = np.sum(mask)
+        equiv_radius = np.sqrt(area / np.pi)
+
+        # 创建圆形扩展掩码
+        h, w = mask.shape
+        y_grid, x_grid = np.ogrid[:h, :w]
+        dist_from_center = np.sqrt(
+            (y_grid - center_y)**2 + (x_grid - center_x)**2)
+
+        # 创建平滑的圆形掩码
+        expanded_mask = dist_from_center <= (
+            equiv_radius + self.config.expand_pixels)
+
+        # 结合原始掩码
+        enhanced_mask = np.logical_or(mask, expanded_mask)
+
+        return enhanced_mask.astype(np.uint8)
+
+    def _extract_colony_data(self, img: np.ndarray, mask: np.ndarray,
+                             colony_id: str, detection_method: str = 'sam') -> Dict:
+        """从图像和掩码中提取菌落数据"""
+        # 计算边界框
+        y_indices, x_indices = np.where(mask)
+        if len(y_indices) == 0:
+            return None
+
+        minr, minc = np.min(y_indices), np.min(x_indices)
+        maxr, maxc = np.max(y_indices) + 1, np.max(x_indices) + 1
+
+        # 提取菌落图像和掩码
+        colony_img = img[minr:maxr, minc:maxc].copy()
+        colony_mask = mask[minr:maxr, minc:maxc]
+
+        # 创建掩码应用的图像
+        masked_img = np.zeros_like(colony_img)
+        masked_img[colony_mask > 0] = colony_img[colony_mask > 0]
+
+        # 计算基本属性
+        area = float(np.sum(mask))
+        centroid = (float(np.mean(y_indices)), float(np.mean(x_indices)))
+
+        return {
+            'id': colony_id,
+            'bbox': (minr, minc, maxr, maxc),
+            'area': area,
+            'centroid': centroid,
+            'mask': colony_mask,
+            'img': colony_img,
+            'masked_img': masked_img,
+            'detection_method': detection_method
+        }
+    
+    def _is_background_region(self, mask: np.ndarray, img: np.ndarray) -> bool:
+        """检测是否为背景区域"""
+        try:
+            # 使用配置中的参数
+            h, w = mask.shape
+            area = np.sum(mask)
+            img_area = h * w
+
+            # 1. 面积检查
+            if area > img_area * self.config.max_background_ratio:
+                logging.debug(f"背景检测: 面积过大 {area/img_area:.3f}")
+                return True
+
+            # 2. 边缘接触检查
+            edge_pixels = (np.sum(mask[0, :]) + np.sum(mask[-1, :]) +
+                           np.sum(mask[:, 0]) + np.sum(mask[:, -1]))
+            edge_ratio = edge_pixels / area if area > 0 else 0
+
+            if edge_ratio > self.config.edge_contact_limit:
+                logging.debug(f"背景检测: 边缘接触过多 {edge_ratio:.3f}")
+                return True
+
+            # 3. 形状规整度检查（可选）
+            if hasattr(self.config, 'shape_regularity_min'):
+                regularity = self._calculate_shape_regularity(mask)
+                if regularity < self.config.shape_regularity_min:
+                    logging.debug(f"背景检测: 形状过于不规则 {regularity:.3f}")
+                    return True
+
+            return False
+
+        except Exception as e:
+            logging.error(f"背景检测出错: {e}")
+            return False
+
+    def _calculate_shape_regularity(self, mask: np.ndarray) -> float:
+        """计算形状规整度（圆形度）"""
+        try:
+            contours, _ = cv2.findContours(
+                mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+
+            if not contours:
+                return 0
+
+            main_contour = max(contours, key=cv2.contourArea)
+            area = cv2.contourArea(main_contour)
+            perimeter = cv2.arcLength(main_contour, True)
+
+            if perimeter == 0:
+                return 0
+
+            circularity = 4 * np.pi * area / (perimeter * perimeter)
+            return min(circularity, 1.0)
+
+        except Exception:
+            return 0
+
+
+    #post_process
+
+    def _post_process_colonies(self, colonies: List[Dict]) -> List[Dict]:
+        """后处理菌落列表 - 增强版"""
+        if not colonies:
+            return colonies
+
+        # 原有的验证逻辑
+        valid_colonies = []
+        for colony in colonies:
+            is_valid, error_msg = DataValidator.validate_colony(colony)
+            if is_valid:
+                valid_colonies.append(colony)
+            else:
+                logging.debug(f"移除无效菌落: {error_msg}")
+
+        # 【新增】计算质量分数（如果还没有）
+        for colony in valid_colonies:
+            if 'quality_score' not in colony:
+                self._quality_score_adjustment(colony)
+
+        # 【新增】根据质量分数过滤（可选）
+        if hasattr(self.config, 'min_quality_score'):
+            min_score = self.config.min_quality_score
+            quality_filtered = [c for c in valid_colonies if c.get(
+                'quality_score', 0) >= min_score]
+
+            if len(quality_filtered) < len(valid_colonies):
+                logging.info(
+                    f"质量过滤: {len(valid_colonies)} -> {len(quality_filtered)}")
+                valid_colonies = quality_filtered
+
+        # 过滤重叠菌落（使用质量分数改进优先级）
+        if self.config.merge_overlapping and len(valid_colonies) > 1:
+            valid_colonies = self._filter_overlapping_colonies_by_quality(
+                valid_colonies)
+
+        return valid_colonies
+    
+    def _filter_overlapping_colonies(self, colonies: List[Dict]) -> List[Dict]:
+        """改进的重叠过滤 - 修复版本"""
+        if len(colonies) <= 1:
+            return colonies
+
+        logging.info(f"重叠过滤前: {len(colonies)} 个菌落")
+
+        # 🔥 修复：先按面积排序，优先保留中等大小的菌落
+        # 而不是最大的（可能是背景）
+        def get_priority_score(colony):
+            area = colony['area']
+            # 给中等大小的菌落更高的优先级
+            if 1000 <= area <= 20000:  # 理想菌落大小范围
+                return area + 100000  # 提高优先级
+            else:
+                return area
+
+        sorted_colonies = sorted(
+            colonies, key=get_priority_score, reverse=True)
+
+        filtered_colonies = []
+        used_regions = []
+        overlap_count = 0
+
+        for i, colony in enumerate(sorted_colonies):
+            bbox = colony['bbox']
+            colony_id = colony.get('id', f'colony_{i}')
+            area = colony['area']
+
+            # 🔥 新增：直接跳过异常大的区域
+            img_area = 1074 * 1607  # 从调试信息获得的图像大小
+            if area > img_area * 0.3:  # 超过图像30%的区域直接跳过
+                logging.warning(f"跳过异常大区域 {colony_id}: 面积={area}")
+                overlap_count += 1
+                continue
+
+            # 检查重叠
+            is_overlapping = False
+            max_overlap = 0.0
+
+            for j, used_bbox in enumerate(used_regions):
+                overlap = self._calculate_bbox_overlap(bbox, used_bbox)
+                max_overlap = max(max_overlap, overlap)
+
+                if overlap > self.config.overlap_threshold:
+                    is_overlapping = True
+                    logging.debug(f"菌落 {colony_id} 与菌落 {j} 重叠 {overlap:.3f}")
+                    break
+
+            if not is_overlapping:
+                filtered_colonies.append(colony)
+                used_regions.append(bbox)
+                logging.debug(
+                    f"✓ 保留菌落 {colony_id}, 面积={area}, 最大重叠={max_overlap:.3f}")
+            else:
+                overlap_count += 1
+
+        logging.info(
+            f"重叠过滤：{len(colonies)} -> {len(filtered_colonies)} (移除 {overlap_count} 个)")
+        return filtered_colonies
+    
+    def _filter_overlapping_colonies_by_quality(self, colonies: List[Dict]) -> List[Dict]:
+        """根据质量分数过滤重叠菌落"""
+        if len(colonies) <= 1:
+            return colonies
+
+        # 按质量分数排序，而不是简单按面积
+        sorted_colonies = sorted(
+            colonies,
+            key=lambda x: x.get('quality_score', x.get('sam_score', 0)),
+            reverse=True
+        )
+
+        filtered_colonies = []
+        used_regions = []
+
+        for colony in sorted_colonies:
+            bbox = colony['bbox']
+
+            is_overlapping = False
+            for used_bbox in used_regions:
+                if self._calculate_bbox_overlap(bbox, used_bbox) > self.config.overlap_threshold:
+                    is_overlapping = True
+                    break
+
+            if not is_overlapping:
+                filtered_colonies.append(colony)
+                used_regions.append(bbox)
+
+        logging.info(f"质量优先重叠过滤：{len(colonies)} -> {len(filtered_colonies)}")
+        return filtered_colonies
+
+
+
+    def _calculate_bbox_overlap(self, bbox1: Tuple, bbox2: Tuple) -> float:
+        """计算两个边界框的重叠比例"""
+        minr1, minc1, maxr1, maxc1 = bbox1
+        minr2, minc2, maxr2, maxc2 = bbox2
+
+        # 计算重叠区域
+        overlap_minr = max(minr1, minr2)
+        overlap_minc = max(minc1, minc2)
+        overlap_maxr = min(maxr1, maxr2)
+        overlap_maxc = min(maxc1, maxc2)
+
+        # 检查是否有重叠
+        if overlap_minr >= overlap_maxr or overlap_minc >= overlap_maxc:
+            return 0.0
+
+        # 计算重叠面积和比例
+        overlap_area = (overlap_maxr - overlap_minr) * \
+            (overlap_maxc - overlap_minc)
+        area1 = (maxr1 - minr1) * (maxc1 - minc1)
+        area2 = (maxr2 - minr2) * (maxc2 - minc2)
+
+        return overlap_area / min(area1, area2)
+
+
+    def _remove_duplicates(self, colonies: List[Dict]) -> List[Dict]:
+        """
+        移除重复的菌落 - 用于合并不同检测方法的结果
+        
+        重复判定标准：
+        1. 中心点距离小于阈值
+        2. 边界框重叠超过阈值
+        3. 优先保留质量分数高的
+        """
+        if len(colonies) <= 1:
+            return colonies
+
+        logging.info(f"去重前: {len(colonies)} 个菌落")
+
+        # 按质量分数排序，优先保留高质量的
+        def get_quality_score(colony):
+            # SAM分数
+            sam_score = colony.get('sam_score', 0.5)
+
+            # 检测方法优先级
+            method_priority = {
+                'sam_auto_refined': 1.0,
+                'sam_auto': 0.9,
+                'sam_grid': 0.8,
+                'hybrid_supplement': 0.7
+            }
+            method = colony.get('detection_method', 'unknown')
+            method_score = method_priority.get(method, 0.5)
+
+            # 面积合理性（假设理想面积在5000左右）
+            area = colony.get('area', 0)
+            area_score = 1.0 - abs(area - 5000) / 10000
+            area_score = max(0, min(1, area_score))
+
+            # 综合分数
+            return sam_score * 0.5 + method_score * 0.3 + area_score * 0.2
+
+        sorted_colonies = sorted(colonies, key=get_quality_score, reverse=True)
+
+        unique_colonies = []
+
+        for i, colony in enumerate(sorted_colonies):
+            is_duplicate = False
+
+            # 与已接受的菌落比较
+            for accepted in unique_colonies:
+                # 检查中心点距离
+                if self._check_centroid_distance(colony, accepted):
+                    is_duplicate = True
+                    logging.debug(
+                        f"菌落 {colony.get('id')} 与 {accepted.get('id')} 中心点过近")
+                    break
+
+                # 检查边界框重叠
+                overlap = self._calculate_bbox_overlap(
+                    colony['bbox'], accepted['bbox'])
+                if overlap > 0.6:  # 60%重叠认为是重复
+                    is_duplicate = True
+                    logging.debug(
+                        f"菌落 {colony.get('id')} 与 {accepted.get('id')} 重叠 {overlap:.2f}")
+                    break
+
+            if not is_duplicate:
+                unique_colonies.append(colony)
+
+        logging.info(
+            f"去重后: {len(unique_colonies)} 个菌落 (移除 {len(colonies) - len(unique_colonies)} 个)")
+
+        return unique_colonies
+
+    def _check_centroid_distance(self, colony1: Dict, colony2: Dict,
+                                 threshold: float = 50.0) -> bool:
+        """
+        检查两个菌落的中心点距离是否过近
+        
+        Args:
+            colony1, colony2: 菌落数据
+            threshold: 距离阈值（像素）
+        
+        Returns:
+            bool: True if too close (likely duplicate)
+        """
+        if 'centroid' not in colony1 or 'centroid' not in colony2:
+            return False
+
+        c1 = colony1['centroid']
+        c2 = colony2['centroid']
+
+        distance = np.sqrt((c1[0] - c2[0])**2 + (c1[1] - c2[1])**2)
+
+        return distance < threshold
+
+    def _merge_duplicate_colonies(self, colonies: List[Dict]) -> List[Dict]:
+        """
+        合并重复菌落的高级版本 - 不仅去重，还可以合并信息
+        
+        当两个菌落被判定为重复时，可以选择合并它们的信息
+        而不是简单地丢弃一个
+        """
+        if len(colonies) <= 1:
+            return colonies
+
+        # 构建重复组
+        duplicate_groups = []
+        processed = set()
+
+        for i, colony1 in enumerate(colonies):
+            if i in processed:
+                continue
+
+            group = [colony1]
+            processed.add(i)
+
+            for j, colony2 in enumerate(colonies[i+1:], i+1):
+                if j in processed:
+                    continue
+
+                # 检查是否重复
+                centroid_close = self._check_centroid_distance(colony1, colony2)
+                bbox_overlap = self._calculate_bbox_overlap(
+                    colony1['bbox'], colony2['bbox']
+                ) > 0.5
+
+                if centroid_close or bbox_overlap:
+                    group.append(colony2)
+                    processed.add(j)
+
+            duplicate_groups.append(group)
+
+        # 合并每组重复菌落
+        merged_colonies = []
+
+        for group in duplicate_groups:
+            if len(group) == 1:
+                merged_colonies.append(group[0])
+            else:
+                # 合并策略：选择最佳的基础菌落，然后补充信息
+                best_colony = max(group, key=lambda c: c.get('sam_score', 0))
+
+                # 可以从其他重复菌落中补充信息
+                # 例如：如果一个有孔位信息，另一个没有
+                for colony in group:
+                    if 'well_position' in colony and 'well_position' not in best_colony:
+                        best_colony['well_position'] = colony['well_position']
+                        best_colony['row'] = colony.get('row')
+                        best_colony['column'] = colony.get('column')
+
+                # 记录合并信息
+                best_colony['merged_from'] = len(group)
+                best_colony['detection_methods'] = list(set(
+                    c.get('detection_method', 'unknown') for c in group
+                ))
+
+                merged_colonies.append(best_colony)
+
+        logging.info(f"合并重复菌落: {len(colonies)} -> {len(merged_colonies)}")
+
+        return merged_colonies
+    
+    def _quality_score_adjustment(self, colony: Dict) -> float:
+        """
+        基于多个因素计算菌落质量分数
+        
+        使用场景：在最终结果输出前调用，为每个菌落计算综合质量分数
+        """
+        # 基础SAM分数
+        base_score = colony.get('sam_score', 0.5)
+
+        # 位置因素（成功映射到孔位的加分）
+        position_bonus = 0
+        if 'well_position' in colony and not colony['well_position'].startswith('unmapped'):
+            position_bonus = 0.1
+            # 如果不是跨界的，再加分
+            if not colony.get('cross_boundary', False):
+                position_bonus += 0.05
+
+        # 形状因素
+        shape_bonus = 0
+        if 'features' in colony:
+            circularity = colony['features'].get('circularity', 0)
+            shape_bonus = circularity * 0.1
+        else:
+            # 快速计算圆形度
+            if 'mask' in colony:
+                regularity = self._calculate_shape_regularity(colony['mask'])
+                shape_bonus = regularity * 0.1
+
+        # 大小因素
+        area = colony.get('area', 0)
+        size_bonus = 0
+        if 1000 < area < 20000:  # 理想范围
+            size_bonus = 0.1
+        elif 500 < area < 30000:  # 可接受范围
+            size_bonus = 0.05
+
+        # 检测方法因素
+        method_bonus = {
+            'sam_auto_refined': 0.1,
+            'high_quality': 0.1,
+            'sam_auto': 0.05,
+            'sam_grid': 0.05,
+            'hybrid_supplement': 0,
+            'supplementary': 0
+        }.get(colony.get('detection_method', ''), 0)
+
+        # 计算最终分数
+        final_score = base_score + position_bonus + \
+            shape_bonus + size_bonus + method_bonus
+
+        # 存储详细评分
+        colony['quality_score'] = min(final_score, 1.0)
+        colony['quality_details'] = {
+            'base_score': base_score,
+            'position_bonus': position_bonus,
+            'shape_bonus': shape_bonus,
+            'size_bonus': size_bonus,
+            'method_bonus': method_bonus
+        }
+
+        return colony['quality_score']

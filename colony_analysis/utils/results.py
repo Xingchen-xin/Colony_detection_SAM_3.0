@@ -84,7 +84,10 @@ class ResultManager:
                 'well_position': colony.get('well_position', ''),
                 'area': float(colony.get('area', 0)),
                 'detection_method': colony.get('detection_method', 'unknown'),
-                'sam_score': colony.get('sam_score', 0.0)
+                'sam_score': colony.get('sam_score', 0.0),
+                'quality_score': colony.get('quality_score', 0),
+                'cross_boundary': colony.get('cross_boundary', False),
+                'overlapping_wells': ','.join(colony.get('overlapping_wells', []))
             }
 
             # 添加特征

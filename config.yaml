@@ -6,13 +6,27 @@
 
 detection: 
   model_type: vit_b              # SAM模型类型: vit_b, vit_l, vit_h
-  mode:auto                     # 检测模式: auto, grid, hybrid
+  mode: hybird                     # 检测模式: auto, grid, hybrid
   min_colony_area: 500         # 最小菌落面积
   max_colony_area: 50000   # 最大菌落面积
   expand_pixels: 2               # 掩码扩展像素数
   merge_overlapping: true        # 是否合并重叠菌落
   use_preprocessing: true        # 是否使用图像预处理
   overlap_threshold: 0.3         # 重叠阈值
+  # 增强功能开关
+  enable_adaptive_grid: true      # 启用自适应网格调整
+  sort_by_quality: true           # 按质量分数排序结果
+  min_quality_score: 0.3          # 最低质量分数阈值
+  
+  # Hybrid模式参数
+  min_colonies_expected: 30       # 预期最少菌落数
+  max_mapping_distance: 0.4       # 最大映射距离（相对于孔位大小）
+  supplement_score_threshold: 0.5 # 补充检测的分数阈值
+  edge_margin_ratio: 0.08         # 边缘边距比例
+  
+  # 跨界处理参数
+  cross_boundary_overlap_threshold: 0.1  # 跨界判定的重叠阈值
+  mark_cross_boundary: true              # 是否标记跨界菌落
 
 sam: 
   points_per_side: 64            # 每边采样点数
