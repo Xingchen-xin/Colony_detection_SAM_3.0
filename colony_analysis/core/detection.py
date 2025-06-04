@@ -6,10 +6,12 @@
 # 保留原有的基础函数，只更新和添加需要的部分
 
 import cv2
+import os
 import numpy as np
 import logging
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
+from tqdm import tqdm
 
 from .sam_model import SAMModel
 from ..utils.validation import ImageValidator, DataValidator
@@ -20,25 +22,32 @@ from ..utils.validation import ImageValidator, DataValidator
 class DetectionConfig:
     """检测配置数据类 - 完整版"""
     mode: str = 'auto'
-    min_colony_area: int = 500
+    min_colony_area: int = 300
     max_colony_area: int = 50000
     expand_pixels: int = 2
+    adaptive_gradient_thresh: int = 60   # 自适应梯度阈值
+    adaptive_expand_iters: int = 11      # 自适应膨胀迭代次数
     merge_overlapping: bool = True
     use_preprocessing: bool = True
     overlap_threshold: float = 0.3
     background_filter: bool = True
+    max_background_ratio: float = 0.3        # 背景面积阈值 (原 0.2 -> 0.3)
+    edge_contact_limit: float = 0.8          # 边缘接触比例阈值 (放宽为 0.6)
+    enable_edge_artifact_filter: bool = False  # 是否启用边缘伪影过滤 (默认 False)
+    edge_margin_pixels: int = 20  # 边缘伪影检测的像素边距
+
 
     # 混合模式专用参数
     enable_multi_stage: bool = True
     high_quality_threshold: float = 0.8
     supplementary_threshold: float = 0.65
-    max_background_ratio: float = 0.2
-    edge_contact_limit: float = 0.3
+    #max_background_ratio: float = 0.2
+    #edge_contact_limit: float = 0.3
     shape_regularity_min: float = 0.2
 
     # 去重相关参数
     duplicate_centroid_threshold: float = 50.0  # 中心点距离阈值
-    duplicate_overlap_threshold: float = 0.6     # 边界框重叠阈值
+    duplicate_overlap_threshold: float = 0.5     # 边界框重叠阈值
     enable_duplicate_merging: bool = False       # 是否启用信息合并
       # 增强功能开关
     enable_adaptive_grid: bool = True      # 启用自适应网格调整
@@ -61,10 +70,13 @@ class DetectionConfig:
 class ColonyDetector:
     """统一的菌落检测器"""
     # base class for colony detection, integrating SAMModel and configuration management
-    def __init__(self, sam_model: SAMModel, config=None):
+
+    def __init__(self, sam_model: SAMModel, config=None, result_manager=None, debug: bool = False):
         """初始化菌落检测器"""
         self.sam_model = sam_model
         self.config = self._load_detection_config(config)
+        self.result_manager = result_manager
+        self.debug = debug
         logging.info("菌落检测器已初始化")
 
     def _load_detection_config(self, config) -> DetectionConfig:
@@ -110,6 +122,22 @@ class ColonyDetector:
 
         logging.info(f"检测完成，发现 {len(colonies)} 个菌落")
         return colonies
+
+    def save_raw_debug(self, img: np.ndarray):
+        """
+        当检测不到任何菌落时，保存所有原始 SAM 掩码叠加图到 debug 目录以便排查。
+        """
+        # 再次调用 SAM 获取原始掩码
+        masks, scores = self.sam_model.segment_everything(img, return_logits=False)
+        debug_dir = self.result_manager.directories['debug']
+        for i, mask in enumerate(masks):
+            vis = img.copy()
+            vis[mask > 0] = [255, 0, 0]  # 用红色高亮原始 SAM 掩码
+            filename = f"debug_raw_mask_unmapped_{i}.png"
+            cv2.imwrite(
+                str(debug_dir / filename),
+                cv2.cvtColor(vis, cv2.COLOR_RGB2BGR)
+            )
 
     #preprocess_image
     def _preprocess_image(self, img_rgb: np.ndarray) -> np.ndarray:
@@ -161,8 +189,23 @@ class ColonyDetector:
             'valid': 0
         }
 
-        for i, (mask, score) in enumerate(zip(masks, scores)):
-            enhanced_mask = self._enhance_colony_mask(mask)
+        for i, (mask, score) in enumerate(tqdm(zip(masks, scores), total=len(masks), desc="Auto detecting colonies")):
+            enhanced_mask = self._enhance_colony_mask(mask, img)
+            # —— 在这里插入可视化调试代码 ——
+            # 如果开启 debug，就把可视化结果存到 ResultManager 的 debug 文件夹
+            if self.debug:
+                # 先把 mask 区域用绿色叠加到 img 上
+                vis = img.copy()
+                vis[enhanced_mask > 0] = [0, 255, 0]  # 绿色标记
+                # 构造文件名
+                filename = f"debug_colony_{i}.png"
+                # 获取 ResultManager 的 debug 目录
+                debug_dir = self.result_manager.directories['debug']
+                # 最终完整路径
+                save_path = debug_dir / filename
+                # 使用 cv2.imwrite 保存（记得转换回 BGR）
+                cv2.imwrite(str(save_path), cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
+
             area = np.sum(enhanced_mask)
 
             # 🔥 新增：面积范围检查
@@ -226,6 +269,22 @@ class ColonyDetector:
         # Step 3: 将检测到的菌落映射到最近的孔位
         mapped_colonies = self._map_colonies_to_wells(
             auto_colonies, plate_grid)
+
+        # ======== 自动重命名 Debug 图为对应的孔位标签 ========
+        debug_dir = self.result_manager.directories['debug']
+        for colony in mapped_colonies:
+            original_id = colony.get('id', '')
+            well_id = colony.get('well_position', '')
+            # 原始 debug 文件名里 id 格式为 'colony_{i}'
+            if original_id.startswith('colony_') and well_id and not well_id.startswith('unmapped'):
+                idx = original_id.split('_')[1]
+                old_name = f"debug_colony_unmapped_{idx}.png"
+                new_name = f"debug_colony_{well_id}_{idx}.png"
+                old_path = debug_dir / old_name
+                new_path = debug_dir / new_name
+                if old_path.exists():
+                    os.rename(str(old_path), str(new_path))
+        # ======== 重命名结束 ========
 
         # Step 3.5: 【新增】处理跨界菌落
         mapped_colonies = self._cross_boundary_colony_handling(
@@ -292,9 +351,9 @@ class ColonyDetector:
         img_area = img.shape[0] * img.shape[1]
         well_area = img_area / (8 * 12)  # 假设96孔板
 
-        # 菌落面积应该在单个孔的10%-80%之间
+        # 菌落面积应该在单个孔的10%-90%之间
         min_colony_area = int(well_area * 0.1)
-        max_colony_area = int(well_area * 0.8)
+        max_colony_area = int(well_area * 0.9)
 
         logging.info(f"动态计算面积范围: {min_colony_area} - {max_colony_area}")
 
@@ -318,25 +377,76 @@ class ColonyDetector:
             stats = {'valid': 0, 'too_small': 0,
                      'too_large': 0, 'low_score': 0}
 
-            for i, (mask, score) in enumerate(zip(masks, scores)):
-                enhanced_mask = self._enhance_colony_mask(mask)
+            for i, (mask, score) in enumerate(tqdm(zip(masks, scores), total=len(masks), desc="Refined auto detecting")):
+                enhanced_mask = self._enhance_colony_mask(mask, img)
+                # —— 在这里插入可视化调试代码 ——
+                if self.debug:
+                    # 先把 mask 区域用绿色叠加到 img 上
+                    vis = img.copy()
+                    vis[enhanced_mask > 0] = [0, 255, 0]  # 绿色标记
+                    # 构造文件名
+                    filename = f"debug_colony_unmapped_{i}.png"
+                    # 获取 ResultManager 的 debug 目录
+                    debug_dir = self.result_manager.directories['debug']
+                    # 最终完整路径
+                    save_path = debug_dir / filename
+                    # 使用 cv2.imwrite 保存（记得转换回 BGR）
+                    cv2.imwrite(str(save_path), cv2.cvtColor(
+                        vis, cv2.COLOR_RGB2BGR))
                 area = np.sum(enhanced_mask)
 
+                # 新增：边缘伪影检测（由配置决定是否启用）
+                if self.config.enable_edge_artifact_filter and \
+                   self._is_edge_artifact(enhanced_mask, img.shape[:2], self.config.edge_margin_pixels):
+                    # 进一步检查，如果掩码中检测到蓝/红色素，就恢复保留，否则跳过
+                    hsv_local = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+                    h_loc, s_loc, _ = cv2.split(hsv_local)
+                    ys_e, xs_e = np.where(enhanced_mask > 0)
+                    if len(ys_e) > 0:
+                        mean_h = float(np.mean(h_loc[ys_e, xs_e]))
+                        mean_s = float(np.mean(s_loc[ys_e, xs_e]))
+                    else:
+                        mean_h, mean_s = 0.0, 0.0
+                    # “蓝色”判定
+                    is_blue = (90 <= mean_h <= 140 and mean_s > 40)
+                    # “红色”判定
+                    is_red = ((mean_h <= 10 or mean_h >= 170) and mean_s > 40)
+                    if is_blue or is_red:
+                        logging.debug(f"掩码 {i} 被标记为伪影但含色素，恢复保留")
+                        # 不跳过，继续后续过滤与提取
+                    else:
+                        logging.debug(f"掩码 {i} 被识别为纯伪影，跳过")
+                        continue
+
                 # 严格的面积过滤
-                if area < min_colony_area:
+                if area < min_colony_area // 2:
+                    logging.debug(f"[Mask {i}] 面积({area}) < 最小要求({min_colony_area//2}) => too_small")
                     stats['too_small'] += 1
                     continue
                 if area > max_colony_area:
+                    logging.debug(f"[Mask {i}] 面积({area}) > 最大允许({max_colony_area}) => too_large")
                     stats['too_large'] += 1
                     continue
 
                 # 质量分数过滤
-                if score < 0.7:  # 提高质量要求
+                if score < 0.5:
+                    logging.debug(f"[Mask {i}] SAM 分数({score:.2f}) < 0.50 => low_score")
                     stats['low_score'] += 1
                     continue
 
                 # 形状合理性检查
                 if not self._is_reasonable_colony_shape(enhanced_mask):
+                    logging.debug(f"[Mask {i}] 形状不合理 => filtered by _is_reasonable_colony_shape")
+                    continue
+
+                if not self._filter_by_shape(enhanced_mask):
+                    logging.debug(f"[Mask {i}] 圆度 < 0.6 => filtered by _filter_by_shape")
+                    continue  # 跳过形状不符的
+
+                # 背景检测
+                if self.config.background_filter and self._is_background_region(enhanced_mask, img):
+                    logging.debug(f"[Mask {i}] 被识别为背景区域 => background")
+                    stats['background'] = stats.get('background', 0) + 1
                     continue
 
                 colony_data = self._extract_colony_data(
@@ -398,56 +508,59 @@ class ColonyDetector:
 
         return plate_grid
 
+
     def _map_colonies_to_wells(self, colonies: List[Dict], plate_grid: Dict[str, Dict]) -> List[Dict]:
-        """将检测到的菌落映射到孔位"""
+        """将菌落映射到孔位 - 软映射策略（IoU + centroid fallback）"""
         mapped_colonies = []
-        used_wells = set()
+        overlap_threshold = self.config.cross_boundary_overlap_threshold if hasattr(self.config, 'cross_boundary_overlap_threshold') else 0.1
+        centroid_margin = 5  # 可参数化
 
-        # 为每个菌落找到最近的孔位
-        for colony in colonies:
-            colony_center = colony['centroid']
-            best_well = None
-            min_distance = float('inf')
+        for colony in tqdm(colonies, desc="映射菌落到孔位", ncols=80):
+            bbox = colony.get("bbox")  # [minr, minc, maxr, maxc]
+            centroid = colony.get("centroid")  # (y, x)
+            best_match = None
+            best_iou = 0
 
-            # 搜索最近的未使用孔位
             for well_id, well_info in plate_grid.items():
-                if well_id in used_wells:
-                    continue
+                x1, y1, x2, y2 = well_info["expected_bbox"][1], well_info["expected_bbox"][0], well_info["expected_bbox"][3], well_info["expected_bbox"][2]
 
-                well_center = well_info['center']
-                distance = np.sqrt((colony_center[0] - well_center[0])**2 +
-                                   (colony_center[1] - well_center[1])**2)
+                # IoU 计算
+                inter_x1 = max(bbox[1], x1)
+                inter_y1 = max(bbox[0], y1)
+                inter_x2 = min(bbox[3], x2)
+                inter_y2 = min(bbox[2], y2)
 
-                # 检查是否在搜索半径内
-                if distance <= well_info['search_radius'] and distance < min_distance:
-                    min_distance = distance
-                    best_well = well_id
+                inter_area = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
+                bbox_area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+                well_area = (y2 - y1) * (x2 - x1)
+                union_area = bbox_area + well_area - inter_area
+                iou = inter_area / union_area if union_area > 0 else 0
 
-            if best_well:
-                # 映射成功
-                colony['well_position'] = best_well
-                colony['id'] = best_well
-                colony['well_distance'] = min_distance
-                colony['row'] = plate_grid[best_well]['row']
-                colony['column'] = plate_grid[best_well]['col']
+                if iou > best_iou:
+                    best_iou = iou
+                    best_match = well_id
 
-                mapped_colonies.append(colony)
-                used_wells.add(best_well)
-
-                logging.debug(
-                    f"菌落映射: {colony['centroid']} -> {best_well} (距离: {min_distance:.1f})")
+            # 判断是否符合 IoU 匹配
+            if best_iou >= overlap_threshold:
+                colony["well_position"] = best_match
+                logging.debug(f"[Colony {colony.get('id','')}] IoU({best_iou:.2f}) 匹配到孔位 {best_match}")
             else:
-                # 无法映射到孔位，可能是边缘菌落或污染
-                colony['well_position'] = f"unmapped_{len(mapped_colonies)}"
-                colony['id'] = colony['well_position']
-                mapped_colonies.append(colony)
-                logging.warning(f"菌落无法映射到孔位: {colony['centroid']}")
+                # fallback：centroid 落点策略
+                c_y, c_x = centroid
+                matched = False
+                for well_id, info in plate_grid.items():
+                    x1, y1, x2, y2 = info["expected_bbox"][1], info["expected_bbox"][0], info["expected_bbox"][3], info["expected_bbox"][2]
+                    if (x1 - centroid_margin <= c_x <= x2 + centroid_margin and
+                        y1 - centroid_margin <= c_y <= y2 + centroid_margin):
+                        colony["well_position"] = well_id
+                        logging.debug(f"[Colony {colony.get('id','')}] 中心点({c_y:.1f},{c_x:.1f})Fallback => 匹配到孔位 {well_id}")
+                        matched = True
+                        break
+                if not matched:
+                    colony["well_position"] = f"unmapped_{colony.get('id', 'unknown')}"
+                    logging.debug(f"[Colony {colony.get('id','')}] 无法映射 => unmapped")
 
-        # 生成缺失孔位报告
-        all_wells = set(plate_grid.keys())
-        missing_wells = all_wells - used_wells
-        if missing_wells:
-            logging.info(f"空孔位: {sorted(missing_wells)}")
+            mapped_colonies.append(colony)
 
         return mapped_colonies
     
@@ -458,7 +571,7 @@ class ColonyDetector:
         
         使用场景：在孔位映射后调用，标记和处理跨界情况
         """
-        for colony in colonies:
+        for colony in tqdm(colonies, desc="处理跨界菌落", ncols=80):
             bbox = colony['bbox']
             overlapping_wells = []
             overlap_ratios = {}
@@ -506,7 +619,7 @@ class ColonyDetector:
         logging.info(f"尝试补充检测 {len(missing_wells)} 个空孔位")
 
         supplemented = []
-        for well_id in list(missing_wells)[:20]:  # 最多补充20个
+        for well_id in tqdm(list(missing_wells)[:20], desc="补充检测空孔位", ncols=80):
             info = grid_info[well_id]
             bbox = info['expected_bbox']
 
@@ -570,7 +683,7 @@ class ColonyDetector:
             offset_x = actual_center[1] - expected_center[1]
 
             # 只统计合理范围内的偏移
-            if abs(offset_y) < 50 and abs(offset_x) < 50:
+            if abs(offset_y) < 500 and abs(offset_x) < 500:
                 total_offset_y += offset_y
                 total_offset_x += offset_x
                 valid_mappings += 1
@@ -583,7 +696,7 @@ class ColonyDetector:
         avg_offset_x = total_offset_x / valid_mappings
 
         # 如果偏移显著，调整网格
-        if abs(avg_offset_y) > 10 or abs(avg_offset_x) > 10:
+        if abs(avg_offset_y) > 100 or abs(avg_offset_x) > 100:
             logging.info(
                 f"检测到网格偏移: Y={avg_offset_y:.1f}, X={avg_offset_x:.1f}")
 
@@ -637,7 +750,7 @@ class ColonyDetector:
             aspect_ratio = max(width, height) / min(width, height)
 
             # 合理性检查
-            reasonable_circularity = 0.3 < circularity < 1.2  # 不要太不规则
+            reasonable_circularity = 0.2 < circularity < 1.5  # 不要太不规则
             reasonable_aspect = aspect_ratio < 3.0  # 不要太细长
 
             if not (reasonable_circularity and reasonable_aspect):
@@ -651,36 +764,118 @@ class ColonyDetector:
             logging.error(f"形状检查出错: {e}")
             return False
 
+    def _filter_by_shape(self, mask: np.ndarray) -> bool:
+        """形状过滤：只保留比较“圆”的连通区域"""
+        contours, _ = cv2.findContours(mask.astype(
+            np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return False
+        cnt = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(cnt)
+        perimeter = cv2.arcLength(cnt, True)
+        circularity = 4 * np.pi * area / (perimeter * perimeter + 1e-6)
+        if circularity < 0.6:  # 不规则污渍圆度较低
+            return False
+        return True
 
 
     #tools and methods
-    def _enhance_colony_mask(self, mask: np.ndarray) -> np.ndarray:
-        """增强菌落掩码形状"""
+
+    def _enhance_colony_mask(self, mask: np.ndarray, img: np.ndarray) -> np.ndarray:
+        """增强菌落掩码形状 - 基于梯度 + 颜色的自适应膨胀"""
+
         if np.sum(mask) == 0:
             return mask
 
-        # 找到质心
-        y_indices, x_indices = np.where(mask)
-        center_y, center_x = np.mean(y_indices), np.mean(x_indices)
+        # 1. 对原始 mask 做一次形态学闭运算，填补内部小孔洞
+        kernel_close = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (self.config.expand_pixels*2 + 1, self.config.expand_pixels*2 + 1)
+        )
+        mask_closed = cv2.morphologyEx(mask.astype(
+            np.uint8), cv2.MORPH_CLOSE, kernel_close)
+        mask_closed = (mask_closed > 0).astype(np.uint8)
 
-        # 计算等效半径
-        area = np.sum(mask)
-        equiv_radius = np.sqrt(area / np.pi)
+        # 2. 生成颜色预种子 (蓝/红色素)
+        hsv_full = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+        h_full, s_full, v_full = cv2.split(hsv_full)
+        b_channel = img[:, :, 2].astype(np.int32)
+        r_channel = img[:, :, 0].astype(np.int32)
+        g_channel = img[:, :, 1].astype(np.int32)
 
-        # 创建圆形扩展掩码
-        h, w = mask.shape
-        y_grid, x_grid = np.ogrid[:h, :w]
-        dist_from_center = np.sqrt(
-            (y_grid - center_y)**2 + (x_grid - center_x)**2)
+        # 蓝色素预种子：满足 Hue∈[90,140]，且 B > R+20、B > G+20
+        blue_mask = ((h_full >= 90) & (h_full <= 140) &
+                     (b_channel > r_channel + 20) &
+                     (b_channel > g_channel + 20)).astype(np.uint8)
+        # 红色素预种子：满足 Hue∈[0,10]或[170,179]，且 R > B+20、R > G+20，S>60,V>60
+        red_mask = ((((h_full <= 10) | (h_full >= 170)) &
+                     (r_channel > b_channel + 20) &
+                     (r_channel > g_channel + 20) &
+                     (s_full > 60) & (v_full > 60))).astype(np.uint8)
 
-        # 创建平滑的圆形掩码
-        expanded_mask = dist_from_center <= (
-            equiv_radius + self.config.expand_pixels)
+        # 限制可扩张邻域：先对 mask_closed 做一次轻度腐蚀，再膨胀，得到“邻域掩码”
+        kernel_seed = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        # 先将 mask_closed 轻度腐蚀，使邻域膨胀受限
+        shrunk = mask_closed.copy()
+        neighbor_mask = cv2.dilate(shrunk, kernel_seed, iterations=7)
 
-        # 结合原始掩码
-        enhanced_mask = np.logical_or(mask, expanded_mask)
+        # 仅在 neighbor_mask 范围内提取颜色预种子，避免背景扩散
+        blue_seed = cv2.bitwise_and(blue_mask, neighbor_mask)
+        red_seed = cv2.bitwise_and(red_mask, neighbor_mask)
 
-        return enhanced_mask.astype(np.uint8)
+        # 合并 SAM 闭运算结果与受限颜色预种子
+        combined_seed = cv2.bitwise_or(mask_closed, blue_seed)
+        combined_seed = cv2.bitwise_or(combined_seed, red_seed)
+
+        # 对 combined_seed 再做小闭运算 + 膨胀，填补内部空洞
+        combined_seed = cv2.morphologyEx(combined_seed, cv2.MORPH_CLOSE, kernel_seed)
+        combined_seed = cv2.dilate(combined_seed, kernel_seed, iterations=2)
+
+        enhanced = combined_seed.copy().astype(np.uint8)
+
+        # 3. 将 RGB 图转灰度并计算 Sobel 梯度
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        grad_mag = np.sqrt(grad_x**2 + grad_y**2)
+        grad_norm = cv2.normalize(
+            grad_mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+        # 4. 读取配置阈值和迭代次数
+        gradient_thresh = self.config.adaptive_gradient_thresh  # 已改为 50
+        iterations = self.config.adaptive_expand_iters          # 已改为 9
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+
+        # 5. 自适应膨胀：只在 neighbor_mask 区域内进行灰度/颜色扩张
+        for _ in range(iterations):
+            dilated = cv2.dilate(enhanced, kernel, iterations=1)
+            boundary = cv2.subtract(dilated, enhanced)
+            # 限制到邻域掩码，防止整图扩散
+            ys, xs = np.where((boundary > 0) & (neighbor_mask > 0))
+            for y, x in zip(ys, xs):
+                # 收紧灰度条件：灰度差 < 15
+                cond_gray = (grad_norm[y, x] < gradient_thresh and
+                             abs(int(gray[y, x]) - int(gray[min(y+1, gray.shape[0]-1), x])) < 15)
+                cond_blue = (90 <= h_full[y, x] <= 140 and
+                             b_channel[y, x] > r_channel[y, x] + 20 and
+                             b_channel[y, x] > g_channel[y, x] + 20)
+                # 收紧红色阈值：R 对比度 > b+15, g+15，饱和度/亮度 > 60
+                cond_red = (((h_full[y, x] <= 10 or h_full[y, x] >= 170) and
+                             r_channel[y, x] > b_channel[y, x] + 15 and
+                             r_channel[y, x] > g_channel[y, x] + 15 and
+                             s_full[y, x] > 60 and v_full[y, x] > 60))
+                if cond_gray or cond_blue or cond_red:
+                    enhanced[y, x] = 1
+
+        # 6. 第二次小闭运算，进一步填补残余空洞
+        kernel_second = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        enhanced = cv2.morphologyEx(enhanced, cv2.MORPH_CLOSE, kernel_second)
+
+        # 7. 第三次小膨胀，使边缘尽量完整
+        kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        enhanced = cv2.dilate(enhanced, kernel_small, iterations=1)
+
+        return enhanced.astype(np.uint8)
 
     def _extract_colony_data(self, img: np.ndarray, mask: np.ndarray,
                              colony_id: str, detection_method: str = 'sam') -> Dict:
@@ -692,6 +887,12 @@ class ColonyDetector:
 
         minr, minc = np.min(y_indices), np.min(x_indices)
         maxr, maxc = np.max(y_indices) + 1, np.max(x_indices) + 1
+        # 对边界框进行微调：向外扩展2像素并限制在图像范围内
+        height, width = img.shape[:2]
+        minr = max(0, minr - 2)
+        minc = max(0, minc - 2)
+        maxr = min(height, maxr + 2)
+        maxc = min(width, maxc + 2)
 
         # 提取菌落图像和掩码
         colony_img = img[minr:maxr, minc:maxc].copy()
@@ -724,18 +925,20 @@ class ColonyDetector:
             area = np.sum(mask)
             img_area = h * w
 
-            # 1. 面积检查
+            # 1. 面积检查 (使用 config.max_background_ratio)
             if area > img_area * self.config.max_background_ratio:
-                logging.debug(f"背景检测: 面积过大 {area/img_area:.3f}")
+ 
+                logging.debug(f"背景检测: 面积过大 {area/img_area:.3f} > {self.config.max_background_ratio}")
                 return True
 
-            # 2. 边缘接触检查
+            # 2. 边缘接触检查 (使用 config.edge_contact_limit)
             edge_pixels = (np.sum(mask[0, :]) + np.sum(mask[-1, :]) +
-                           np.sum(mask[:, 0]) + np.sum(mask[:, -1]))
+                                                       np.sum(mask[:, 0]) + np.sum(mask[:, -1]))
             edge_ratio = edge_pixels / area if area > 0 else 0
 
             if edge_ratio > self.config.edge_contact_limit:
-                logging.debug(f"背景检测: 边缘接触过多 {edge_ratio:.3f}")
+
+                logging.debug(f"背景检测: 边缘接触过多 {edge_ratio:.3f} > {self.config.edge_contact_limit}")
                 return True
 
             # 3. 形状规整度检查（可选）
@@ -750,6 +953,64 @@ class ColonyDetector:
         except Exception as e:
             logging.error(f"背景检测出错: {e}")
             return False
+
+    def _is_edge_artifact(self, mask: np.ndarray, img_shape: Tuple[int, int],
+                          edge_margin: int = 20) -> bool:
+        """
+        检测是否为边缘伪影
+        
+        Args:
+            mask: 菌落掩码
+            img_shape: 图像尺寸 (height, width)
+            edge_margin: 边缘边距（像素）
+        
+        Returns:
+            bool: True if likely an edge artifact
+        """
+        h, w = img_shape
+
+        # 获取掩码的边界框
+        y_indices, x_indices = np.where(mask)
+        if len(y_indices) == 0:
+            return False
+
+        min_y, max_y = np.min(y_indices), np.max(y_indices)
+        min_x, max_x = np.min(x_indices), np.max(x_indices)
+
+        # 检查是否紧贴图像边缘
+        touches_top = min_y < edge_margin
+        touches_bottom = max_y > h - edge_margin
+        touches_left = min_x < edge_margin
+        touches_right = max_x > w - edge_margin
+
+        # 计算接触边缘的数量
+        edge_contacts = sum([touches_top, touches_bottom,
+                             touches_left, touches_right])
+
+        # 如果接触2个或更多边缘，很可能是边缘伪影
+        if edge_contacts >= 2:
+            return True
+
+        # 如果只接触一个边缘，但覆盖了大部分边缘长度
+        if edge_contacts == 1:
+            # 计算沿边缘的覆盖率
+            if touches_top or touches_bottom:
+                edge_coverage = (max_x - min_x) / w
+            else:
+                edge_coverage = (max_y - min_y) / h
+
+            # 如果覆盖超过10%的边缘，可能是伪影
+            if edge_coverage > 0.10:
+                return True
+
+        # 检查形状是否异常（非常细长且贴边）
+        if edge_contacts > 0:
+            aspect_ratio = max(max_x - min_x, max_y - min_y) / \
+                min(max_x - min_x, max_y - min_y)
+            if aspect_ratio > 3:  # 非常细长
+                return True
+
+        return False
 
     def _calculate_shape_regularity(self, mask: np.ndarray) -> float:
         """计算形状规整度（圆形度）"""
@@ -895,7 +1156,7 @@ class ColonyDetector:
 
             is_overlapping = False
             for used_bbox in used_regions:
-                if self._calculate_bbox_overlap(bbox, used_bbox) > self.config.overlap_threshold:
+                if self._calculate_bbox_overlap(bbox, used_bbox) > self.config.duplicate_overlap_threshold:
                     is_overlapping = True
                     break
 

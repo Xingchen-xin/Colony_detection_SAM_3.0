@@ -6,13 +6,25 @@
 
 detection: 
   model_type: vit_b              # SAM模型类型: vit_b, vit_l, vit_h
-  mode: hybird                     # 检测模式: auto, grid, hybrid
-  min_colony_area: 500         # 最小菌落面积
+  mode: hybrid                     # 检测模式: auto, grid, hybrid
+  min_colony_area: 200         # 最小菌落面积
   max_colony_area: 50000   # 最大菌落面积
   expand_pixels: 2               # 掩码扩展像素数
+  adaptive_gradient_thresh: 60    # 自适应梯度阈值（新加字段）
+  adaptive_expand_iters: 7        # 自适应膨胀迭代次数（新加字段）
   merge_overlapping: true        # 是否合并重叠菌落
   use_preprocessing: true        # 是否使用图像预处理
+  background_filter: true
   overlap_threshold: 0.3         # 重叠阈值
+  duplicate_overlap_threshold: 0.5   # NMS 的重叠阈值
+  max_background_ratio: 0.3    # 或你想要的值
+
+
+  # 边缘检测参数
+  enable_edge_artifact_filter: true         # 启用边缘伪影过滤
+  edge_margin_pixels: 10            # 边缘检测边距（像素），改为 10
+  edge_contact_limit: 0.8      # 边缘覆盖率阈值，提高到 0.6
+
   # 增强功能开关
   enable_adaptive_grid: true      # 启用自适应网格调整
   sort_by_quality: true           # 按质量分数排序结果
@@ -20,9 +32,13 @@ detection:
   
   # Hybrid模式参数
   min_colonies_expected: 30       # 预期最少菌落数
-  max_mapping_distance: 0.4       # 最大映射距离（相对于孔位大小）
+  max_mapping_distance: 0.5       # 最大映射距离（相对于孔位大小）
   supplement_score_threshold: 0.5 # 补充检测的分数阈值
   edge_margin_ratio: 0.08         # 边缘边距比例
+
+  # 映射参数
+  edge_well_radius_multiplier: 1.2  # 边缘孔位搜索半径倍数
+  extended_search_multiplier: 1.5   # 扩展搜索半径倍数
   
   # 跨界处理参数
   cross_boundary_overlap_threshold: 0.1  # 跨界判定的重叠阈值
@@ -37,7 +53,7 @@ sam:
   crop_n_points_downscale_factor: 1  # 下采样因子
 
 analysis: 
-  advanced: false                # 是否启用高级分析
+  advanced: true               # 是否启用高级分析
   learning_enabled: false        # 是否启用学习系统
   aerial_threshold: 0.6          # 气生菌丝阈值
   metabolite_threshold: 0.5      # 代谢产物阈值

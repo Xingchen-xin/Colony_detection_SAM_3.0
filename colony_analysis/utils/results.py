@@ -10,6 +10,9 @@ import numpy as np
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any
+import os
+import shutil
+from tqdm import tqdm
 
 
 class ResultManager:
@@ -63,6 +66,18 @@ class ResultManager:
                 masks_dir = self.save_colony_masks(colonies)
                 saved_files['masks'] = str(masks_dir)
 
+                # 将 metabolite 调试图像复制到输出 debug 目录
+                metabolite_debug_src = Path("debug_metabolite")
+                if metabolite_debug_src.exists() and metabolite_debug_src.is_dir():
+                    for f in metabolite_debug_src.iterdir():
+                        if f.is_file():
+                            shutil.move(str(f), str(self.directories['debug'] / f.name))
+                    # 可选：删除源目录
+                    try:
+                        metabolite_debug_src.rmdir()
+                    except OSError:
+                        pass
+
             # 5. 生成分析报告
             report_path = self.generate_analysis_report(colonies, args)
             saved_files['report'] = str(report_path)
@@ -78,7 +93,7 @@ class ResultManager:
         """保存CSV格式的结果"""
         rows = []
 
-        for colony in colonies:
+        for colony in tqdm(colonies, desc="保存CSV结果", ncols=80):
             row = {
                 'id': colony.get('id', 'unknown'),
                 'well_position': colony.get('well_position', ''),
@@ -103,8 +118,11 @@ class ResultManager:
             # 添加表型
             phenotype = colony.get('phenotype', {})
             for name, value in phenotype.items():
-                row[f'phenotype_{name}'] = str(value)
-
+            # 处理可能的列表类型
+                if isinstance(value, list):
+                    row[f'phenotype_{name}'] = ', '.join(map(str, value))
+                else:
+                    row[f'phenotype_{name}'] = str(value)
             rows.append(row)
 
         # 保存CSV
@@ -137,7 +155,7 @@ class ResultManager:
         """保存JSON格式的详细结果"""
         serializable_data = []
 
-        for colony in colonies:
+        for colony in tqdm(colonies, desc="保存JSON结果", ncols=80):
             colony_data = {
                 'id': colony.get('id', 'unknown'),
                 'basic_info': {
@@ -175,7 +193,7 @@ class ResultManager:
 
         images_saved = 0
 
-        for colony in colonies:
+        for colony in tqdm(colonies, desc="保存菌落图像", ncols=80):
             if 'img' not in colony:
                 continue
 
@@ -207,7 +225,7 @@ class ResultManager:
 
         masks_saved = 0
 
-        for colony in colonies:
+        for colony in tqdm(colonies, desc="保存菌落掩码", ncols=80):
             if 'mask' not in colony:
                 continue
 
@@ -270,7 +288,7 @@ class ResultManager:
     def _generate_detection_info(self, colonies: List[Dict], args) -> Dict:
         """生成检测信息"""
         detection_methods = {}
-        for colony in colonies:
+        for colony in tqdm(colonies, desc="生成定量报告数据", ncols=80):
             method = colony.get('detection_method', 'unknown')
             detection_methods[method] = detection_methods.get(method, 0) + 1
 
@@ -290,9 +308,14 @@ class ResultManager:
             for category, value in phenotype.items():
                 if category not in phenotype_stats:
                     phenotype_stats[category] = {}
-                phenotype_stats[category][value] = phenotype_stats[category].get(
-                    value, 0) + 1
+            # 处理特殊情况：如果值是列表，转换为字符串
+            if isinstance(value, list):
+                value_key = ', '.join(map(str, value)) if value else 'none'
+            else:
+                value_key = value
 
+            phenotype_stats[category][value_key] = phenotype_stats[category].get(
+                value_key, 0) + 1
         return phenotype_stats
 
     def _generate_quality_metrics(self, colonies: List[Dict]) -> Dict:

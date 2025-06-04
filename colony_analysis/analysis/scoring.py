@@ -106,9 +106,9 @@ class ScoringSystem:
         else:
             development_state = 'mature_spores'
 
-        # 代谢产物产生分类
-        has_blue = features.get('metabolite_has_blue_pigment', False)
-        has_red = features.get('metabolite_has_red_pigment', False)
+        # 判断是否存在蓝色或红色色素
+        has_blue = features.get('metabolite_blue_ratio', 0) > 0
+        has_red = features.get('metabolite_red_ratio', 0) > 0
 
         if has_blue and has_red:
             metabolite_production = 'actinorhodin_and_prodigiosin'

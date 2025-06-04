@@ -6,6 +6,8 @@ import logging
 import numpy as np
 from typing import List, Dict, Optional
 
+from tqdm import tqdm
+
 from ..core.sam_model import SAMModel
 from .features import FeatureExtractor
 from .scoring import ScoringSystem
@@ -14,10 +16,11 @@ from .scoring import ScoringSystem
 class ColonyAnalyzer:
     """菌落分析器 - 提取特征并进行评分分类"""
 
-    def __init__(self, sam_model: Optional[SAMModel] = None, config=None):
+    def __init__(self, sam_model: Optional[SAMModel] = None, config=None, debug: bool = False):
         """初始化菌落分析器"""
         self.sam_model = sam_model
         self.config = config
+        self.debug = debug
         self.feature_extractors = []
         self.scoring_system = ScoringSystem()
         self._init_feature_extractors()
@@ -27,9 +30,9 @@ class ColonyAnalyzer:
     def _init_feature_extractors(self):
         """初始化特征提取器"""
         self.feature_extractors = [
-            FeatureExtractor(extractor_type='basic'),
-            FeatureExtractor(extractor_type='aerial'),
-            FeatureExtractor(extractor_type='metabolite')
+            FeatureExtractor(extractor_type='basic', debug=self.debug),
+            FeatureExtractor(extractor_type='aerial', debug=self.debug),
+            FeatureExtractor(extractor_type='metabolite', debug=self.debug)
         ]
 
     def analyze(self, colonies: List[Dict], advanced: bool = False) -> List[Dict]:
@@ -40,15 +43,10 @@ class ColonyAnalyzer:
 
         analyzed_colonies = []
 
-        for i, colony in enumerate(colonies):
+        for i, colony in enumerate(tqdm(colonies, desc="分析菌落", ncols=80)):
             try:
                 analyzed_colony = self.analyze_colony(colony, advanced)
                 analyzed_colonies.append(analyzed_colony)
-
-                # 每处理10个菌落记录一次进度
-                if (i + 1) % 10 == 0:
-                    logging.info(f"已分析 {i+1}/{len(colonies)} 个菌落")
-
             except Exception as e:
                 logging.error(f"分析菌落 {i} 时出错: {e}")
                 analyzed_colonies.append(colony)
@@ -96,8 +94,10 @@ class ColonyAnalyzer:
         # 处理跨界情况
         if colony.get('cross_boundary', False):
             colony['phenotype']['special_case'] = 'cross_boundary'
-            colony['phenotype']['affected_wells'] = colony.get(
-            'overlapping_wells', [])
+            # 将列表转换为逗号分隔的字符串
+            affected_wells = colony.get('overlapping_wells', [])
+            colony['phenotype']['affected_wells'] = ', '.join(
+            affected_wells) if affected_wells else 'none'
         return colony
 
     def _perform_advanced_analysis(self, colony: Dict):

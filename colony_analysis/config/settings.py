@@ -16,11 +16,40 @@ class DetectionConfig:
     """检测配置"""
     model_type: str = 'vit_b'
     mode: str = 'auto'
-    min_colony_area: int = 5000
-    expand_pixels: int = 8
+    min_colony_area: int = 300
+    max_colony_area: int = 50000
+    expand_pixels: int = 2
+    adaptive_gradient_thresh: int = 50
+    adaptive_expand_iters: int = 7
     merge_overlapping: bool = True
     use_preprocessing: bool = True
+    background_filter: bool = True
     overlap_threshold: float = 0.3
+    duplicate_overlap_threshold: float = 0.5
+    max_background_ratio: float = 0.3
+    enable_edge_artifact_filter: bool = False
+    edge_margin_pixels: int = 20
+    edge_contact_limit: float = 0.5
+    # 混合模式专用参数
+    enable_multi_stage: bool = True
+    high_quality_threshold: float = 0.8
+    supplementary_threshold: float = 0.65
+    shape_regularity_min: float = 0.2
+    # 去重相关参数
+    duplicate_centroid_threshold: float = 50.0
+    enable_duplicate_merging: bool = False
+    # 增强功能开关
+    enable_adaptive_grid: bool = True
+    sort_by_quality: bool = True
+    min_quality_score: float = 0.3
+    # Hybrid模式参数
+    min_colonies_expected: int = 30
+    max_mapping_distance: float = 0.5
+    supplement_score_threshold: float = 0.5
+    edge_margin_ratio: float = 0.08
+    # 跨界处理参数
+    cross_boundary_overlap_threshold: float = 0.1
+    mark_cross_boundary: bool = True
 
 
 @dataclass

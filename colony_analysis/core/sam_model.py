@@ -9,6 +9,7 @@ import cv2
 import logging
 from pathlib import Path
 from typing import Optional, List, Tuple
+from tqdm import tqdm
 
 from segment_anything import sam_model_registry, SamPredictor, SamAutomaticMaskGenerator
 
@@ -115,7 +116,7 @@ class SAMModel:
         masks = []
         scores = []
 
-        for mask_data in masks_data:
+        for mask_data in tqdm(masks_data, desc="SAM 分割候选", ncols=80):
             mask = mask_data['segmentation']
             score = mask_data['stability_score']
             area = mask_data['area']
@@ -147,29 +148,29 @@ class SAMModel:
         row_labels = [chr(65 + i) for i in range(rows)]
 
         # 遍历每个网格单元
-        for r in range(rows):
-            for c in range(cols):
-                # 计算单元格边界
-                pad_y = int(cell_height * padding)
-                pad_x = int(cell_width * padding)
+        for (r, c) in tqdm([(r, c) for r in range(rows) for c in range(cols)],
+                            desc="网格分割", ncols=80):
+            # 计算单元格边界
+            pad_y = int(cell_height * padding)
+            pad_x = int(cell_width * padding)
 
-                y1 = int(r * cell_height) + pad_y
-                y2 = int((r + 1) * cell_height) - pad_y
-                x1 = int(c * cell_width) + pad_x
-                x2 = int((c + 1) * cell_width) - pad_x
+            y1 = int(r * cell_height) + pad_y
+            y2 = int((r + 1) * cell_height) - pad_y
+            x1 = int(c * cell_width) + pad_x
+            x2 = int((c + 1) * cell_width) - pad_x
 
-                # 创建边界框
-                box = np.array([x1, y1, x2, y2])
+            # 创建边界框
+            box = np.array([x1, y1, x2, y2])
 
-                try:
-                    mask, score = self.segment_with_prompts(image, boxes=box)
-                    masks.append(mask)
-                    labels.append(f"{row_labels[r]}{c+1}")
-                except Exception as e:
-                    logging.warning(f"分割网格单元 {row_labels[r]}{c+1} 失败: {e}")
-                    empty_mask = np.zeros((height, width), dtype=bool)
-                    masks.append(empty_mask)
-                    labels.append(f"{row_labels[r]}{c+1}")
+            try:
+                mask, score = self.segment_with_prompts(image, boxes=box)
+                masks.append(mask)
+                labels.append(f"{row_labels[r]}{c+1}")
+            except Exception as e:
+                logging.warning(f"分割网格单元 {row_labels[r]}{c+1} 失败: {e}")
+                empty_mask = np.zeros((height, width), dtype=bool)
+                masks.append(empty_mask)
+                labels.append(f"{row_labels[r]}{c+1}")
 
         return masks, labels
 

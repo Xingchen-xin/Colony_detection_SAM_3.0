@@ -4,15 +4,21 @@
 
 import cv2
 import numpy as np
+import os
 from typing import Dict, Any, Optional
 
 
 class FeatureExtractor:
     """菌落特征提取器"""
 
-    def __init__(self, extractor_type: str = 'basic'):
+    def __init__(self, extractor_type: str = 'basic', debug: bool = False):
         """初始化特征提取器"""
         self.extractor_type = extractor_type
+        self.debug = debug
+        # 如果启用了调试功能，创建用于保存调试图像的目录
+        if self.debug:
+            self.debug_dir = "debug_metabolite"
+            os.makedirs(self.debug_dir, exist_ok=True)
 
     def extract(self, img: np.ndarray, mask: np.ndarray) -> Dict[str, Any]:
         """提取特征"""
@@ -104,39 +110,112 @@ class FeatureExtractor:
         }
 
     def _extract_metabolite_features(self, img: np.ndarray, mask: np.ndarray) -> Dict[str, Any]:
-        """提取代谢产物特征"""
+        """
+        提取代谢产物特征：
+        - 先对培养基进行CLAHE均衡化减弱背景黄褐色
+        - 在菌落边缘检测蓝色色素（actinorhodin），
+        - 在菌落内部检测红色色素（prodigiosin），
+        - 输出面积、比例与平均强度指标
+        """
         binary_mask = mask > 0
-
-        # 提取RGB通道
-        r_channel = img[:, :, 0]
-        g_channel = img[:, :, 1]
-        b_channel = img[:, :, 2]
-
-        # 检测蓝色素(Actinorhodin)
-        blue_mask = (b_channel > 100) & (b_channel > r_channel +
-                                         20) & (b_channel > g_channel + 20) & binary_mask
-        blue_area = np.sum(blue_mask)
-        blue_ratio = blue_area / \
-            np.sum(binary_mask) if np.sum(binary_mask) > 0 else 0
-
-        # 检测红色素(Prodigiosin)
-        red_mask = (r_channel > 100) & (r_channel > b_channel +
-                                        20) & (r_channel > g_channel + 20) & binary_mask
-        red_area = np.sum(red_mask)
-        red_ratio = red_area / \
-            np.sum(binary_mask) if np.sum(binary_mask) > 0 else 0
-
-        # 计算色素强度
-        blue_intensity = np.mean(b_channel[blue_mask]) if blue_area > 0 else 0
-        red_intensity = np.mean(r_channel[red_mask]) if red_area > 0 else 0
-
-        return {
-            'metabolite_blue_area': float(blue_area),
-            'metabolite_blue_ratio': float(blue_ratio),
-            'metabolite_has_blue_pigment': blue_ratio > 0.05,
-            'metabolite_blue_intensity_mean': float(blue_intensity),
-            'metabolite_red_area': float(red_area),
-            'metabolite_red_ratio': float(red_ratio),
-            'metabolite_has_red_pigment': red_ratio > 0.05,
-            'metabolite_red_intensity_mean': float(red_intensity)
+        total_pixels = np.sum(binary_mask)
+        features: Dict[str, Any] = {
+            'metabolite_blue_area': 0.0,
+            'metabolite_blue_ratio': 0.0,
+            'metabolite_blue_intensity_mean': 0.0,
+            'metabolite_red_area': 0.0,
+            'metabolite_red_ratio': 0.0,
+            'metabolite_red_intensity_mean': 0.0,
         }
+
+        if total_pixels == 0:
+            return features
+
+        # 1) 对图像进行CLAHE均衡化，减弱培养基干扰
+        img_hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+        h_ch, s_ch, v_ch = cv2.split(img_hsv)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        v_ch_eq = clahe.apply(v_ch)
+        hsv_eq = cv2.merge([h_ch, s_ch, v_ch_eq])
+        img_eq = cv2.cvtColor(hsv_eq, cv2.COLOR_HSV2RGB)
+
+        # 2) 提取边缘区域用于蓝色检测
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        eroded = cv2.erode(binary_mask.astype(np.uint8), kernel, iterations=2)
+        edge_mask = binary_mask.astype(np.uint8) - eroded
+        edge_mask_bool = edge_mask > 0
+
+        # 3) 在边缘区域检测蓝色色素 (actinorhodin)
+        r_channel = img_eq[:, :, 0].astype(np.int32)
+        g_channel = img_eq[:, :, 1].astype(np.int32)
+        b_channel = img_eq[:, :, 2].astype(np.int32)
+        hsv_eq_full = cv2.cvtColor(img_eq, cv2.COLOR_RGB2HSV)
+        h_full, s_full, v_full_eq = cv2.split(hsv_eq_full)
+
+        blue_threshold = (
+            (b_channel > r_channel + 20) &
+            (b_channel > g_channel + 20) &
+            (h_full >= 90) & (h_full <= 140) &
+            edge_mask_bool
+        )
+
+        # 调试：将蓝色阈值区域生成可视化图，并保存
+        if self.debug:
+            # 生成叠加图：在 img_eq 上标记蓝区为红色
+            vis_blue = img_eq.copy()
+            vis_blue[blue_threshold] = [255, 0, 0]  # 用红色高亮蓝色区域
+            # 计算质心用于命名
+            ys_b, xs_b = np.where(blue_threshold)
+            if len(ys_b) > 0:
+                cy_b = int(np.mean(ys_b))
+                cx_b = int(np.mean(xs_b))
+            else:
+                cy_b, cx_b = 0, 0
+            filename_blue = f"blue_{cy_b}_{cx_b}.png"
+            cv2.imwrite(os.path.join(self.debug_dir, filename_blue),
+                        cv2.cvtColor(vis_blue, cv2.COLOR_RGB2BGR))
+
+        blue_area = np.sum(blue_threshold)
+        features['metabolite_blue_area'] = float(blue_area)
+        features['metabolite_blue_ratio'] = float(blue_area / total_pixels)
+        features['metabolite_blue_intensity_mean'] = float(
+            np.mean(b_channel[blue_threshold]) if blue_area > 0 else 0.0
+        )
+
+        # 4) 在内部区域检测红色色素 (prodigiosin)
+        interior_mask_bool = binary_mask & (~edge_mask_bool)
+
+        red_threshold = (
+            (r_channel > b_channel + 20) &
+            (r_channel > g_channel + 20) &
+            (
+                ((h_full >= 0) & (h_full <= 10)) |
+                ((h_full >= 170) & (h_full <= 179))
+            ) &
+            (s_full > 80) &
+            (v_full_eq > 80) &
+            interior_mask_bool
+        )
+
+        # 调试：将红色阈值区域生成可视化图，并保存
+        if self.debug:
+            vis_red = img_eq.copy()
+            vis_red[red_threshold] = [0, 0, 255]  # 用蓝色高亮红色区域
+            ys_r, xs_r = np.where(red_threshold)
+            if len(ys_r) > 0:
+                cy_r = int(np.mean(ys_r))
+                cx_r = int(np.mean(xs_r))
+            else:
+                cy_r, cx_r = 0, 0
+            filename_red = f"red_{cy_r}_{cx_r}.png"
+            cv2.imwrite(os.path.join(self.debug_dir, filename_red),
+                        cv2.cvtColor(vis_red, cv2.COLOR_RGB2BGR))
+
+        red_area = np.sum(red_threshold)
+        features['metabolite_red_area'] = float(red_area)
+        features['metabolite_red_ratio'] = float(red_area / total_pixels)
+        features['metabolite_red_intensity_mean'] = float(
+            np.mean(r_channel[red_threshold]) if red_area > 0 else 0.0
+        )
+
+        return features

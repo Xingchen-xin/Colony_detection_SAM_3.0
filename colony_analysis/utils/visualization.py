@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 from pathlib import Path
 from typing import List, Dict
+import random
 
 
 class Visualizer:
@@ -41,20 +42,73 @@ class Visualizer:
         if not colonies:
             return
 
-        # 创建带标注的图像
+        # 复制一份原图用于标注
         annotated_img = original_img.copy()
 
-        for i, colony in enumerate(colonies):
-            # 绘制边界框
-            bbox = colony.get('bbox', (0, 0, 0, 0))
-            minr, minc, maxr, maxc = bbox
-            cv2.rectangle(annotated_img, (minc, minr),
-                          (maxc, maxr), (0, 255, 0), 2)
+        # 为每个 colony 随机生成一种颜色（BGR）
+        colors = []
+        for _ in colonies:
+            colors.append((random.randint(50, 255), random.randint(50, 255), random.randint(50, 255)))
 
-            # 添加标签
+        for i, colony in enumerate(colonies):
+            mask = colony.get('mask', None)
+            if mask is None:
+                # 回退到绘制边界框
+                bbox = colony.get('bbox', None)
+                if bbox is None:
+                    continue
+                minr, minc, maxr, maxc = bbox
+                cv2.rectangle(annotated_img, (int(minc), int(minr)),
+                              (int(maxc), int(maxr)), colors[i], 2)
+                label = colony.get('well_position') or colony.get('id', f'C{i}')
+                cv2.putText(annotated_img, str(label), (int(minc), int(minr) - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, colors[i], 2, cv2.LINE_AA)
+                continue
+
+            # ------------------- 使用局部 ROI，避免尺寸不一致 -------------------
+            # bbox 定位
+            bbox = colony.get('bbox', None)
+            if bbox is None:
+                continue
+            minr, minc, maxr, maxc = bbox
+            roi = annotated_img[minr:maxr, minc:maxc]
+
+            # 生成与 ROI 同尺寸的彩色层
+            b, g, r = colors[i]
+            colored_layer = np.zeros_like(roi, dtype=np.uint8)
+            colored_layer[:, :] = (b, g, r)
+
+            # 半透明融合
+            alpha = 0.4
+            mask_bool = mask.astype(bool)
+            roi[mask_bool] = cv2.addWeighted(
+                roi[mask_bool], 1 - alpha, colored_layer[mask_bool], alpha, 0
+            )
+
+            # 把修改后的 ROI 写回
+            annotated_img[minr:maxr, minc:maxc] = roi
+
+            # 轮廓绘制（在 ROI 上绘制再写回）
+            contours, _ = cv2.findContours(
+                mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            cv2.drawContours(annotated_img[minr:maxr, minc:maxc],
+                             contours, -1, colors[i], 2)
+
+            # 计算质心（局部坐标 -> 全局坐标）
+            M = cv2.moments(mask.astype(np.uint8))
+            if M["m00"] != 0:
+                cX_local = int(M["m10"] / M["m00"])
+                cY_local = int(M["m01"] / M["m00"])
+                cX, cY = minc + cX_local, minr + cY_local
+            else:
+                # fallback to bbox中心
+                cY, cX = (minr + maxr) // 2, (minc + maxc) // 2
+
             label = colony.get('well_position') or colony.get('id', f'C{i}')
-            cv2.putText(annotated_img, label, (minc, minr-10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.putText(annotated_img, str(label), (cX, cY - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, colors[i], 2, cv2.LINE_AA)
+            # ------------------- 替换结束 -------------------
 
         # 保存图像
         overview_path = self.viz_dir / 'detection_overview.jpg'
