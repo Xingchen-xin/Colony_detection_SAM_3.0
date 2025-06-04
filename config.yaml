@@ -4,73 +4,70 @@
 
 
 
-detection: 
-  model_type: vit_b              # SAM模型类型: vit_b, vit_l, vit_h
+
+detection:
+  model_type: vit_h                # SAM模型类型: vit_b, vit_l, vit_h
   mode: hybrid                     # 检测模式: auto, grid, hybrid
-  min_colony_area: 200         # 最小菌落面积
-  max_colony_area: 50000   # 最大菌落面积
-  expand_pixels: 2               # 掩码扩展像素数
-  adaptive_gradient_thresh: 60    # 自适应梯度阈值（新加字段）
-  adaptive_expand_iters: 7        # 自适应膨胀迭代次数（新加字段）
-  merge_overlapping: true        # 是否合并重叠菌落
-  use_preprocessing: true        # 是否使用图像预处理
-  background_filter: true
-  overlap_threshold: 0.3         # 重叠阈值
-  duplicate_overlap_threshold: 0.5   # NMS 的重叠阈值
-  max_background_ratio: 0.3    # 或你想要的值
+  min_colony_area: 500             # 最小菌落面积
+  max_colony_area: 50000           # 最大菌落面积
+  expand_pixels: 2                 # 掩码扩展像素数
+  adaptive_gradient_thresh: 30     # 自适应梯度阈值
+  adaptive_expand_iters: 15        # 自适应膨胀迭代次数
+  merge_overlapping: true          # 是否合并重叠菌落
+  overlap_threshold: 0.4           # 重叠阈值
+  use_preprocessing: true          # 是否使用图像预处理
+  background_filter: true          # 是否启用背景过滤
+  max_background_ratio: 0.20       # 最大背景占比阈值
+  edge_contact_limit: 0.5          # 边缘接触比例阈值
+  enable_edge_artifact_filter: true # 是否启用边缘伪影过滤
+  edge_margin_pixels: 20           # 边缘伪影检测的像素边距
+  enable_multi_stage: true         # 是否启用多阶段去重
+  high_quality_threshold: 0.85     # 高质量阈值（hybrid内部使用）
+  supplementary_threshold: 0.5     # 补充检测阈值
+  shape_regularity_min: 0.15        # 形状规整度最低阈值
+  duplicate_centroid_threshold: 30.0 # 去重时中心点距离阈值
+  duplicate_overlap_threshold: 0.5  # 去重时边界框重叠阈值
+  enable_duplicate_merging: true   # 是否启用重复合并
+  enable_adaptive_grid: true       # 启用自适应网格调整
+  sort_by_quality: true            # 按质量分数排序结果
+  min_quality_score: 0.2           # 最低质量分数阈值
+  min_colonies_expected: 30        # 预期最少菌落数（Hybrid模式）
+  max_mapping_distance: 0.5        # 最大映射距离（相对于孔位大小）
+  supplement_score_threshold: 0.5  # 补充检测的分数阈值
+  edge_margin_ratio: 0.08          # 边缘边距占比
+  cross_boundary_overlap_threshold: 0.1 # 跨界判定重叠阈值
+  mark_cross_boundary: true        # 是否标记跨界菌落
+  centroid_margin: 5               # fallback时中心点容差（像素）
+  min_roundness: 0.5               # 最小圆度阈值
+  max_aspect_ratio: 3.0            # 最大长宽比阈值
 
-
-  # 边缘检测参数
-  enable_edge_artifact_filter: true         # 启用边缘伪影过滤
-  edge_margin_pixels: 10            # 边缘检测边距（像素），改为 10
-  edge_contact_limit: 0.8      # 边缘覆盖率阈值，提高到 0.6
-
-  # 增强功能开关
-  enable_adaptive_grid: true      # 启用自适应网格调整
-  sort_by_quality: true           # 按质量分数排序结果
-  min_quality_score: 0.3          # 最低质量分数阈值
-  
-  # Hybrid模式参数
-  min_colonies_expected: 30       # 预期最少菌落数
-  max_mapping_distance: 0.5       # 最大映射距离（相对于孔位大小）
-  supplement_score_threshold: 0.5 # 补充检测的分数阈值
-  edge_margin_ratio: 0.08         # 边缘边距比例
-
-  # 映射参数
-  edge_well_radius_multiplier: 1.2  # 边缘孔位搜索半径倍数
-  extended_search_multiplier: 1.5   # 扩展搜索半径倍数
-  
-  # 跨界处理参数
-  cross_boundary_overlap_threshold: 0.1  # 跨界判定的重叠阈值
-  mark_cross_boundary: true              # 是否标记跨界菌落
-
-sam: 
+sam:
   points_per_side: 64            # 每边采样点数
-  pred_iou_thresh: 0.75          # IoU阈值
-  stability_score_thresh: 0.65    # 稳定性分数阈值
-  min_mask_region_area: 50     # 最小掩码区域面积
+  pred_iou_thresh: 0.92          # IoU阈值
+  stability_score_thresh: 0.95   # 稳定性分数阈值
+  min_mask_region_area: 100      # 最小掩码区域面积
   crop_n_layers: 1               # 裁剪层数
   crop_n_points_downscale_factor: 1  # 下采样因子
 
-analysis: 
+analysis:
   advanced: true               # 是否启用高级分析
-  learning_enabled: false        # 是否启用学习系统
-  aerial_threshold: 0.6          # 气生菌丝阈值
-  metabolite_threshold: 0.5      # 代谢产物阈值
-  enable_parallel: false         # 是否启用并行处理
-  max_workers: 4                 # 最大工作线程数
+  learning_enabled: false      # 是否启用学习系统
+  aerial_threshold: 0.6        # 气生菌丝阈值
+  metabolite_threshold: 0.5    # 代谢产物阈值
+  enable_parallel: false       # 是否启用并行处理
+  max_workers: 4               # 最大工作线程数
 
-output: 
+output:
   debug: true                   # 是否生成调试输出
-  well_plate: false              # 是否使用孔板编号
-  rows: 8                        # 孔板行数
-  cols: 12                       # 孔板列数
-  save_masks: true               # 是否保存掩码
-  save_visualizations: true      # 是否保存可视化
-  image_format: jpg              # 图像输出格式
+  well_plate: false             # 是否使用孔板编号
+  rows: 8                       # 孔板行数
+  cols: 12                      # 孔板列数
+  save_masks: true              # 是否保存掩码
+  save_visualizations: true     # 是否保存可视化
+  image_format: jpg             # 图像输出格式
 
-logging: 
-  level: DEBUG                    # 日志级别: DEBUG, INFO, WARNING, ERROR
-  log_to_file: true              # 是否记录到文件
-  log_dir: null                  # 日志目录 (null = 自动)
-  max_log_files: 10              # 最大日志文件数
+logging:
+  level: DEBUG                  # 日志级别: DEBUG, INFO, WARNING, ERROR
+  log_to_file: true             # 是否记录到文件
+  log_dir: null                 # 日志目录 (null = 自动)
+  max_log_files: 10             # 最大日志文件数

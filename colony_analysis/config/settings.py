@@ -16,8 +16,8 @@ class DetectionConfig:
     """检测配置"""
     model_type: str = 'vit_b'
     mode: str = 'auto'
-    min_colony_area: int = 300
-    max_colony_area: int = 50000
+    min_colony_area: int = 500
+    max_colony_area: int = 30000
     expand_pixels: int = 2
     adaptive_gradient_thresh: int = 50
     adaptive_expand_iters: int = 7
@@ -34,7 +34,7 @@ class DetectionConfig:
     enable_multi_stage: bool = True
     high_quality_threshold: float = 0.8
     supplementary_threshold: float = 0.65
-    shape_regularity_min: float = 0.2
+    shape_regularity_min: float = 0.1
     # 去重相关参数
     duplicate_centroid_threshold: float = 50.0
     enable_duplicate_merging: bool = False
@@ -55,10 +55,10 @@ class DetectionConfig:
 @dataclass
 class SAMConfig:
     """SAM模型配置"""
-    points_per_side: int = 64
-    pred_iou_thresh: float = 0.85
-    stability_score_thresh: float = 0.8
-    min_mask_region_area: int = 1500
+    points_per_side: int = 128
+    pred_iou_thresh: float = 0.50
+    stability_score_thresh: float = 0.50
+    min_mask_region_area: int = 20
     crop_n_layers: int = 1
     crop_n_points_downscale_factor: int = 1
 

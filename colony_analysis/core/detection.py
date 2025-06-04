@@ -22,49 +22,55 @@ from ..utils.validation import ImageValidator, DataValidator
 class DetectionConfig:
     """检测配置数据类 - 完整版"""
     mode: str = 'auto'
-    min_colony_area: int = 300
+    min_colony_area: int = 500
     max_colony_area: int = 50000
     expand_pixels: int = 2
-    adaptive_gradient_thresh: int = 60   # 自适应梯度阈值
-    adaptive_expand_iters: int = 11      # 自适应膨胀迭代次数
+    adaptive_gradient_thresh: int = 40   # 自适应梯度阈值
+    adaptive_expand_iters: int = 10      # 自适应膨胀迭代次数
     merge_overlapping: bool = True
     use_preprocessing: bool = True
-    overlap_threshold: float = 0.3
+    overlap_threshold: float = 0.4
     background_filter: bool = True
-    max_background_ratio: float = 0.3        # 背景面积阈值 (原 0.2 -> 0.3)
-    edge_contact_limit: float = 0.8          # 边缘接触比例阈值 (放宽为 0.6)
-    enable_edge_artifact_filter: bool = False  # 是否启用边缘伪影过滤 (默认 False)
+    max_background_ratio: float = 0.20        # 背景面积阈值
+    edge_contact_limit: float = 0.5          # 边缘接触比例阈值
+    enable_edge_artifact_filter: bool = True  # 是否启用边缘伪影过滤
     edge_margin_pixels: int = 20  # 边缘伪影检测的像素边距
-
 
     # 混合模式专用参数
     enable_multi_stage: bool = True
-    high_quality_threshold: float = 0.8
-    supplementary_threshold: float = 0.65
+    high_quality_threshold: float = 0.85
+    supplementary_threshold: float = 0.6
     #max_background_ratio: float = 0.2
     #edge_contact_limit: float = 0.3
     shape_regularity_min: float = 0.2
 
     # 去重相关参数
-    duplicate_centroid_threshold: float = 50.0  # 中心点距离阈值
+    duplicate_centroid_threshold: float = 30.0  # 中心点距离阈值
     duplicate_overlap_threshold: float = 0.5     # 边界框重叠阈值
-    enable_duplicate_merging: bool = False       # 是否启用信息合并
-      # 增强功能开关
+    enable_duplicate_merging: bool = True       # 是否启用信息合并
+    # 增强功能开关
     enable_adaptive_grid: bool = True      # 启用自适应网格调整
     sort_by_quality: bool = True           # 按质量分数排序结果
     min_quality_score: float = 0.3          # 最低质量分数阈值
-  
+
     # Hybrid模式参数
     min_colonies_expected: int = 30       # 预期最少菌落数
-    max_mapping_distance: float = 0.4       # 最大映射距离（相对于孔位大小）
+    max_mapping_distance: float = 0.5       # 最大映射距离（相对于孔位大小）
     supplement_score_threshold: float = 0.5 # 补充检测的分数阈值
     edge_margin_ratio: float = 0.08         # 边缘边距比例
-  
+
     # 跨界处理参数
     cross_boundary_overlap_threshold: float = 0.1  # 跨界判定的重叠阈值
     mark_cross_boundary: bool = True              # 是否标记跨界菌落
 
+    # 用于 fallback centroid 匹配时的容差（与 cross_boundary_overlap_threshold 配合使用）
+    centroid_margin: int = 5
 
+    # 新增：形状过滤参数
+    min_roundness: float = 0.5       # 最小圆度阈值
+    max_aspect_ratio: float = 3.0    # 最大长宽比阈值
+    # 最大灰度标准差阈值，用于纹理噪声过滤（越大越宽松）
+    max_gray_std: float = 100.0
 
 
 class ColonyDetector:
@@ -100,7 +106,8 @@ class ColonyDetector:
         is_valid, error_msg = ImageValidator.validate_image(img_rgb)
         if not is_valid:
             raise ValueError(f"图像验证失败: {error_msg}")
-
+        # 存储当前原图，用于后续在 _filter_by_shape 中做灰度纹理判断
+        self._last_img = img_rgb.copy()
         # 确定检测模式
         detection_mode = mode or self.config.mode
 
@@ -351,9 +358,9 @@ class ColonyDetector:
         img_area = img.shape[0] * img.shape[1]
         well_area = img_area / (8 * 12)  # 假设96孔板
 
-        # 菌落面积应该在单个孔的10%-90%之间
-        min_colony_area = int(well_area * 0.1)
-        max_colony_area = int(well_area * 0.9)
+        # 菌落面积应该在单个孔的7%-120%之间
+        min_colony_area = int(well_area * 0.07)
+        max_colony_area = int(well_area * 1.2)
 
         logging.info(f"动态计算面积范围: {min_colony_area} - {max_colony_area}")
 
@@ -369,7 +376,7 @@ class ColonyDetector:
 
         try:
             masks, scores = self.sam_model.segment_everything(
-                img, min_area=min_colony_area // 4
+                img, min_area=max(50, min_colony_area // 4)
             )
             logging.info(f"SAM返回 {len(masks)} 个候选掩码")
 
@@ -419,7 +426,7 @@ class ColonyDetector:
                         continue
 
                 # 严格的面积过滤
-                if area < min_colony_area // 2:
+                if area < min_colony_area // 3:
                     logging.debug(f"[Mask {i}] 面积({area}) < 最小要求({min_colony_area//2}) => too_small")
                     stats['too_small'] += 1
                     continue
@@ -429,15 +436,15 @@ class ColonyDetector:
                     continue
 
                 # 质量分数过滤
-                if score < 0.5:
-                    logging.debug(f"[Mask {i}] SAM 分数({score:.2f}) < 0.50 => low_score")
+                if score < 0.45:
+                    logging.debug(f"[Mask {i}] SAM 分数({score:.2f}) < 0.45 => low_score")
                     stats['low_score'] += 1
                     continue
 
                 # 形状合理性检查
-                if not self._is_reasonable_colony_shape(enhanced_mask):
-                    logging.debug(f"[Mask {i}] 形状不合理 => filtered by _is_reasonable_colony_shape")
-                    continue
+                #if not self._is_reasonable_colony_shape(enhanced_mask):
+                #    logging.debug(f"[Mask {i}] 形状不合理 => filtered by _is_reasonable_colony_shape")
+                #    continue
 
                 if not self._filter_by_shape(enhanced_mask):
                     logging.debug(f"[Mask {i}] 圆度 < 0.6 => filtered by _filter_by_shape")
@@ -470,8 +477,8 @@ class ColonyDetector:
         height, width = img_shape
 
         # 计算网格参数，考虑边距
-        margin_y = height * 0.05  # 5%边距
-        margin_x = width * 0.05
+        margin_y = height * 0.03  # 3%边距
+        margin_x = width * 0.03
 
         usable_height = height - 2 * margin_y
         usable_width = width - 2 * margin_x
@@ -491,7 +498,7 @@ class ColonyDetector:
                 center_x = margin_x + (c + 0.5) * cell_width
 
                 # 扩大搜索半径，允许一定偏移
-                search_radius = min(cell_height, cell_width) * 0.6
+                search_radius = min(cell_height, cell_width) * 0.75
 
                 plate_grid[well_id] = {
                     'center': (center_y, center_x),
@@ -512,9 +519,8 @@ class ColonyDetector:
     def _map_colonies_to_wells(self, colonies: List[Dict], plate_grid: Dict[str, Dict]) -> List[Dict]:
         """将菌落映射到孔位 - 软映射策略（IoU + centroid fallback）"""
         mapped_colonies = []
-        overlap_threshold = self.config.cross_boundary_overlap_threshold if hasattr(self.config, 'cross_boundary_overlap_threshold') else 0.1
-        centroid_margin = 5  # 可参数化
-
+        overlap_threshold = self.config.cross_boundary_overlap_threshold
+        centroid_margin = self.config.centroid_margin
         for colony in tqdm(colonies, desc="映射菌落到孔位", ncols=80):
             bbox = colony.get("bbox")  # [minr, minc, maxr, maxc]
             centroid = colony.get("centroid")  # (y, x)
@@ -765,17 +771,43 @@ class ColonyDetector:
             return False
 
     def _filter_by_shape(self, mask: np.ndarray) -> bool:
-        """形状过滤：只保留比较“圆”的连通区域"""
-        contours, _ = cv2.findContours(mask.astype(
-            np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        """形状过滤：同时结合圆度与灰度纹理过滤裂痕/伪影"""
+        # 使用之前在 detect() 中保存的原始 RGB 图来计算灰度纹理
+        img = self._last_img
+        # 计算轮廓以获取圆度和长宽比
+        contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             return False
         cnt = max(contours, key=cv2.contourArea)
         area = cv2.contourArea(cnt)
         perimeter = cv2.arcLength(cnt, True)
-        circularity = 4 * np.pi * area / (perimeter * perimeter + 1e-6)
-        if circularity < 0.6:  # 不规则污渍圆度较低
+        if perimeter == 0:
             return False
+        circularity = 4 * np.pi * area / (perimeter * perimeter + 1e-6)
+        # 使用配置中的圆度阈值
+        if circularity < self.config.min_roundness:
+            return False
+
+        # 计算最小外接矩形以获取长宽比
+        rect = cv2.minAreaRect(cnt)
+        width, height = rect[1]
+        if min(width, height) <= 0:
+            return False
+        aspect_ratio = max(width, height) / min(width, height)
+        # 使用配置中的长宽比阈值
+        if aspect_ratio > self.config.max_aspect_ratio:
+            return False
+
+        # 如果有原始图，就做灰度纹理判定
+        if img is not None:
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            ys, xs = np.where(mask > 0)
+            if len(ys) > 0:
+                region_vals = gray[ys, xs]
+                # 如果区域灰度标准差非常大，可能是裂痕/杂质
+                if np.std(region_vals) > self.config.max_gray_std:
+                    return False
+
         return True
 
 
@@ -805,19 +837,20 @@ class ColonyDetector:
 
         # 蓝色素预种子：满足 Hue∈[90,140]，且 B > R+20、B > G+20
         blue_mask = ((h_full >= 90) & (h_full <= 140) &
-                     (b_channel > r_channel + 20) &
-                     (b_channel > g_channel + 20)).astype(np.uint8)
+                     (b_channel > r_channel + 10) &
+                     (b_channel > g_channel + 10) &
+                     (s_full > 30)).astype(np.uint8)
         # 红色素预种子：满足 Hue∈[0,10]或[170,179]，且 R > B+20、R > G+20，S>60,V>60
         red_mask = ((((h_full <= 10) | (h_full >= 170)) &
-                     (r_channel > b_channel + 20) &
-                     (r_channel > g_channel + 20) &
-                     (s_full > 60) & (v_full > 60))).astype(np.uint8)
+                     (r_channel > b_channel + 10) &
+                     (r_channel > g_channel + 10) &
+                     (s_full > 30) & (v_full > 30))).astype(np.uint8)
 
         # 限制可扩张邻域：先对 mask_closed 做一次轻度腐蚀，再膨胀，得到“邻域掩码”
-        kernel_seed = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        kernel_seed = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         # 先将 mask_closed 轻度腐蚀，使邻域膨胀受限
         shrunk = mask_closed.copy()
-        neighbor_mask = cv2.dilate(shrunk, kernel_seed, iterations=7)
+        neighbor_mask = cv2.dilate(shrunk, kernel_seed, iterations=5)
 
         # 仅在 neighbor_mask 范围内提取颜色预种子，避免背景扩散
         blue_seed = cv2.bitwise_and(blue_mask, neighbor_mask)
@@ -842,8 +875,9 @@ class ColonyDetector:
             grad_mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
         # 4. 读取配置阈值和迭代次数
-        gradient_thresh = self.config.adaptive_gradient_thresh  # 已改为 50
-        iterations = self.config.adaptive_expand_iters          # 已改为 9
+        # 直接使用配置的灰度梯度阈值，不额外叠加
+        gradient_thresh = self.config.adaptive_gradient_thresh
+        iterations = self.config.adaptive_expand_iters
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 
         # 5. 自适应膨胀：只在 neighbor_mask 区域内进行灰度/颜色扩张
@@ -853,9 +887,9 @@ class ColonyDetector:
             # 限制到邻域掩码，防止整图扩散
             ys, xs = np.where((boundary > 0) & (neighbor_mask > 0))
             for y, x in zip(ys, xs):
-                # 收紧灰度条件：灰度差 < 15
+                # 收紧灰度条件：灰度差 < 20
                 cond_gray = (grad_norm[y, x] < gradient_thresh and
-                             abs(int(gray[y, x]) - int(gray[min(y+1, gray.shape[0]-1), x])) < 15)
+                             abs(int(gray[y, x]) - int(gray[min(y+1, gray.shape[0]-1), x])) < 20)
                 cond_blue = (90 <= h_full[y, x] <= 140 and
                              b_channel[y, x] > r_channel[y, x] + 20 and
                              b_channel[y, x] > g_channel[y, x] + 20)
@@ -1002,13 +1036,30 @@ class ColonyDetector:
             # 如果覆盖超过10%的边缘，可能是伪影
             if edge_coverage > 0.10:
                 return True
-
-        # 检查形状是否异常（非常细长且贴边）
+            
+        # 如果接触任意一个边缘，仅仅因为细长还不够，可以进一步做 solidity 判断
         if edge_contacts > 0:
-            aspect_ratio = max(max_x - min_x, max_y - min_y) / \
-                min(max_x - min_x, max_y - min_y)
+            # 先判断是否非常细长
+            denom = min(max_x - min_x, max_y - min_y) + 1e-6
+            aspect_ratio = max(max_x - min_x, max_y - min_y) / denom
             if aspect_ratio > 3:  # 非常细长
-                return True
+                # 计算 solidity：contour_area / convex_hull_area
+                contours, _ = cv2.findContours(mask.astype(np.uint8),
+                                               cv2.RETR_EXTERNAL,
+                                               cv2.CHAIN_APPROX_SIMPLE)
+                if contours:
+                    cnt = max(contours, key=cv2.contourArea)
+                    hull = cv2.convexHull(cnt)
+                    area_cnt = cv2.contourArea(cnt)
+                    area_hull = cv2.contourArea(hull)
+                    if area_hull > 0:
+                        solidity = area_cnt / area_hull
+                        # 如果 solidity 非常低（低于0.75），说明形态不规整，更像裂纹
+                        if solidity < 0.75:
+                            return True
+                # 否则，即使长宽比>3，solidity 较高时就不当做伪影
+            return False
+
 
         return False
 
