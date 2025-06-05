@@ -342,7 +342,7 @@ class ColonyDetector:
 
         return colonies
 
-    #Hybird detection methods
+    # Hybrid detection methods
     def _detect_auto_mode_refined(self, img: np.ndarray) -> List[Dict]:
         """改进的auto检测：专门针对孔板优化"""
         logging.info("使用孔板优化的auto检测...")
