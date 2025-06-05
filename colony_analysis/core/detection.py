@@ -704,10 +704,24 @@ class ColonyDetector:
             for well_id, info in initial_grid.items():
                 adjusted_info = info.copy()
                 old_center = info['center']
-                adjusted_info['center'] = (
-                    old_center[0] + avg_offset_y,
-                    old_center[1] + avg_offset_x
-                )
+                new_center_y = old_center[0] + avg_offset_y
+                new_center_x = old_center[1] + avg_offset_x
+
+                # 更新中心点
+                adjusted_info['center'] = (new_center_y, new_center_x)
+
+                # 基于新的中心重新计算期望边界框，保持搜索半径不变
+                bbox = info.get('expected_bbox')
+                if bbox:
+                    cell_height = bbox[2] - bbox[0]
+                    cell_width = bbox[3] - bbox[1]
+                    adjusted_info['expected_bbox'] = (
+                        int(new_center_y - cell_height / 2),
+                        int(new_center_x - cell_width / 2),
+                        int(new_center_y + cell_height / 2),
+                        int(new_center_x + cell_width / 2)
+                    )
+
                 adjusted_grid[well_id] = adjusted_info
 
             return adjusted_grid
