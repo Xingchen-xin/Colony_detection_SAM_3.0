@@ -42,6 +42,12 @@ python main.py --image your_image.jpg --output results/ --advanced --debug
 
 # 96孔板模式
 python main.py --image plate.jpg --well-plate --mode grid
+
+# 批量处理目录中的所有图像
+python main.py --input-dir images/ --output batch_results/
+
+# 交互式批处理（开始前确认）
+python main.py --input-dir images/ --output batch_results/ --interactive
 ```
 
 ## 项目结构

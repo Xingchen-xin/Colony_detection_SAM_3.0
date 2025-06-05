@@ -29,11 +29,16 @@ def parse_arguments():
         """
     )
 
-    # 必需参数
-    parser.add_argument('--image', '-i', required=True,
-                        help='输入图像路径')
+    # 输入/输出
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('--image', '-i', nargs='+',
+                       help='输入图像路径，可指定多个')
+    group.add_argument('--input-dir', '-I',
+                       help='包含待分析图像的目录')
     parser.add_argument('--output', '-o', default='output',
                         help='输出目录 (默认: output)')
+    parser.add_argument('--interactive', action='store_true',
+                        help='在批处理模式下与用户交互确认')
 
     # 检测参数
     parser.add_argument('--mode', '-m',
@@ -109,14 +114,36 @@ def main():
         # 显示启动信息
         print_startup_banner()
 
-        # 执行分析流程
         from colony_analysis.pipeline import AnalysisPipeline
 
-        pipeline = AnalysisPipeline(args)
-        results = pipeline.run()
+        images = []
+        if args.input_dir:
+            input_path = Path(args.input_dir)
+            if not input_path.is_dir():
+                raise NotADirectoryError(f"输入目录不存在: {args.input_dir}")
+            for ext in ['*.jpg', '*.jpeg', '*.png', '*.tif', '*.tiff']:
+                images.extend(sorted(str(p) for p in input_path.glob(ext)))
+            if not images:
+                raise FileNotFoundError("在指定目录中未找到图像文件")
+        else:
+            images = args.image
 
-        # 显示完成信息
-        print_completion_summary(results)
+        if args.interactive and len(images) > 1:
+            print("即将处理以下图像:\n" + "\n".join(images))
+            cont = input("继续? [y/N]: ").strip().lower()
+            if cont != 'y':
+                return 0
+
+        for img in images:
+            img_output = Path(args.output)
+            if len(images) > 1:
+                img_output = img_output / Path(img).stem
+            img_args = argparse.Namespace(**vars(args))
+            img_args.image = img
+            img_args.output = str(img_output)
+            pipeline = AnalysisPipeline(img_args)
+            results = pipeline.run()
+            print_completion_summary(results)
 
         return 0
 
