@@ -20,6 +20,19 @@ class Visualizer:
         self.viz_dir = self.output_dir / 'visualizations'
         self.viz_dir.mkdir(parents=True, exist_ok=True)
 
+    def _put_readable_text(self, img: np.ndarray, text: str, position: tuple,
+                           base_color: tuple):
+        """在图像上绘制带黑色边框的文本以增强可读性"""
+        # 根据底色亮度选择白色或黑色文字
+        brightness = (0.299 * base_color[2] +
+                      0.587 * base_color[1] +
+                      0.114 * base_color[0])
+        text_color = (0, 0, 0) if brightness > 186 else (255, 255, 255)
+        cv2.putText(img, text, position, cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(img, text, position, cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6, text_color, 1, cv2.LINE_AA)
+
     def create_debug_visualizations(self, original_img: np.ndarray, colonies: List[Dict]):
         """创建调试可视化"""
         try:
@@ -61,8 +74,12 @@ class Visualizer:
                 cv2.rectangle(annotated_img, (int(minc), int(minr)),
                               (int(maxc), int(maxr)), colors[i], 2)
                 label = colony.get('well_position') or colony.get('id', f'C{i}')
-                cv2.putText(annotated_img, str(label), (int(minc), int(minr) - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, colors[i], 2, cv2.LINE_AA)
+                self._put_readable_text(
+                    annotated_img,
+                    str(label),
+                    (int(minc), int(minr) - 10),
+                    colors[i]
+                )
                 continue
 
             # ------------------- 使用局部 ROI，避免尺寸不一致 -------------------
@@ -106,8 +123,12 @@ class Visualizer:
                 cY, cX = (minr + maxr) // 2, (minc + maxc) // 2
 
             label = colony.get('well_position') or colony.get('id', f'C{i}')
-            cv2.putText(annotated_img, str(label), (cX, cY - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, colors[i], 2, cv2.LINE_AA)
+            self._put_readable_text(
+                annotated_img,
+                str(label),
+                (cX, cY - 10),
+                colors[i]
+            )
             # ------------------- 替换结束 -------------------
 
         # 保存图像
