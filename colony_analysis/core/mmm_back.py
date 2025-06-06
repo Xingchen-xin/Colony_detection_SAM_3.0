@@ -2,19 +2,35 @@
 # colony_analysis/core/mmm_back.py - MMM Back analysis
 # ============================================================================
 
-import cv2
-import numpy as np
+from argparse import Namespace
 from pathlib import Path
 
 
 def mmm_back_analysis(image_path: str, save_folder: str):
-    """MMM_Back 图像分析逻辑"""
-    img = cv2.imread(image_path)
-    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-    l_channel, a_channel, b_channel = cv2.split(lab)
-    # TODO: 对 l_channel 应用 CLAHE，再分割 b_channel/r_channel
-    annotated = img.copy()
-    Path(save_folder).mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(Path(save_folder) / "annotated_Back.png"), annotated)
-    # with open(Path(save_folder) / "stats_Back.txt", "w") as f:
-    #     f.write("...统计数据...")
+    """MMM Back 图像分析逻辑
+
+    调用 ``AnalysisPipeline`` 完成菌落检测与分析。
+    """
+
+    from ..pipeline import AnalysisPipeline
+
+    args = Namespace(
+        image=image_path,
+        output=str(Path(save_folder)),
+        mode="auto",
+        model="vit_b",
+        advanced=False,
+        debug=False,
+        config=None,
+        min_area=2000,
+        well_plate=False,
+        rows=8,
+        cols=12,
+        verbose=False,
+        medium="mmm",
+        orientation="back",
+        replicate=None,
+    )
+
+    pipeline = AnalysisPipeline(args)
+    return pipeline.run()

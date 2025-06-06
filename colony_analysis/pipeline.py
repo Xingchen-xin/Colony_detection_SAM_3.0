@@ -12,15 +12,7 @@ import cv2
 
 from .analysis import ColonyAnalyzer
 from .config import ConfigManager
-from .core import (
-    ColonyDetector,
-    SAMModel,
-    r5_back_analysis,
-    r5_front_analysis,
-    mmm_back_analysis,
-    mmm_front_analysis,
-    combine_metrics,
-)
+from .core import ColonyDetector, SAMModel, combine_metrics
 from .utils import (
     ImageValidator,
     ResultManager,
@@ -309,19 +301,36 @@ def batch_medium_pipeline(input_folder: str, output_folder: str):
         combined_folder.mkdir(parents=True, exist_ok=True)
 
         try:
-            if medium == "r5":
-                if "front" in ori_dict:
-                    r5_front_analysis(str(ori_dict["front"]), str(front_folder))
-                if "back" in ori_dict:
-                    r5_back_analysis(str(ori_dict["back"]), str(back_folder))
-            elif medium == "mmm":
-                if "front" in ori_dict:
-                    mmm_front_analysis(str(ori_dict["front"]), str(front_folder))
-                if "back" in ori_dict:
-                    mmm_back_analysis(str(ori_dict["back"]), str(back_folder))
-            else:
-                logging.warning(f"未知培养基 '{medium}'，跳过 {sample_name}")
-                continue
+            from argparse import Namespace
+
+            def run_one(image_path: Path, out_dir: Path, orientation: str):
+                img_args = Namespace(
+                    image=str(image_path),
+                    output=str(out_dir),
+                    mode="auto",
+                    model="vit_b",
+                    advanced=False,
+                    debug=False,
+                    config=None,
+                    min_area=2000,
+                    well_plate=False,
+                    rows=8,
+                    cols=12,
+                    verbose=False,
+                    medium=medium,
+                    orientation=orientation,
+                    replicate=replicate,
+                )
+                AnalysisPipeline(img_args).run()
+
+            if "front" in ori_dict:
+                run_one(ori_dict["front"], front_folder, "front")
+            if "back" in ori_dict:
+                run_one(ori_dict["back"], back_folder, "back")
+            if "front" not in ori_dict and "back" not in ori_dict:
+                logging.warning(
+                    f"{sample_name} replicate {replicate} 缺少 Front/Back 图像，跳过"
+                )
 
             logging.info(
                 f"已处理 {sample_name} replicate {replicate} ({medium.upper()})"
