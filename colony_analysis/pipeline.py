@@ -295,12 +295,6 @@ def batch_medium_pipeline(input_folder: str, output_folder: str):
     summary_data: Dict[Tuple[str, str], List[Dict[str, float]]] = defaultdict(list)
 
     for (sample_name, medium, replicate), ori_dict in groups.items():
-        if "front" not in ori_dict or "back" not in ori_dict:
-            logging.warning(
-                f"缺少 Front 或 Back 图像: {sample_name} replicate {replicate}"
-            )
-            continue
-
         base_folder = (
             Path(output_folder)
             / sample_name
@@ -316,11 +310,15 @@ def batch_medium_pipeline(input_folder: str, output_folder: str):
 
         try:
             if medium == "r5":
-                r5_front_analysis(str(ori_dict["front"]), str(front_folder))
-                r5_back_analysis(str(ori_dict["back"]), str(back_folder))
+                if "front" in ori_dict:
+                    r5_front_analysis(str(ori_dict["front"]), str(front_folder))
+                if "back" in ori_dict:
+                    r5_back_analysis(str(ori_dict["back"]), str(back_folder))
             elif medium == "mmm":
-                mmm_front_analysis(str(ori_dict["front"]), str(front_folder))
-                mmm_back_analysis(str(ori_dict["back"]), str(back_folder))
+                if "front" in ori_dict:
+                    mmm_front_analysis(str(ori_dict["front"]), str(front_folder))
+                if "back" in ori_dict:
+                    mmm_back_analysis(str(ori_dict["back"]), str(back_folder))
             else:
                 logging.warning(f"未知培养基 '{medium}'，跳过 {sample_name}")
                 continue
@@ -336,15 +334,16 @@ def batch_medium_pipeline(input_folder: str, output_folder: str):
 
         front_stats = front_folder / "stats_Front.txt"
         back_stats = back_folder / "stats_Back.txt"
-        metrics = combine_metrics(str(front_stats), str(back_stats))
-        combined_path = combined_folder / "combined_stats.txt"
-        with open(combined_path, "w") as f:
-            for k, v in metrics.items():
-                f.write(f"{k}: {v}\n")
+        if front_stats.exists() and back_stats.exists():
+            metrics = combine_metrics(str(front_stats), str(back_stats))
+            combined_path = combined_folder / "combined_stats.txt"
+            with open(combined_path, "w") as f:
+                for k, v in metrics.items():
+                    f.write(f"{k}: {v}\n")
 
-        metrics_record = {"replicate": replicate}
-        metrics_record.update(metrics)
-        summary_data[(sample_name, medium)].append(metrics_record)
+            metrics_record = {"replicate": replicate}
+            metrics_record.update(metrics)
+            summary_data[(sample_name, medium)].append(metrics_record)
 
     import csv
     import statistics
