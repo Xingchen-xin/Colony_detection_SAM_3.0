@@ -10,12 +10,12 @@ Colony Detection SAM 2.0 - 完整重构版本
 
 import argparse
 import logging
-import os
 import sys
 import time
 from pathlib import Path
 
 from colony_analysis.pipeline import AnalysisPipeline, batch_medium_pipeline
+from colony_analysis.pairing import pair_colonies_across_views
 from colony_analysis.utils.file_utils import collect_all_images, parse_filename
 
 
@@ -132,6 +132,7 @@ def main():
                 if cont != "y":
                     return 0
             batch_medium_pipeline(args.input_dir, args.output)
+            pair_colonies_across_views(args.output)
             return 0
         else:
             images = args.image
@@ -172,6 +173,7 @@ def main():
             pipeline = AnalysisPipeline(img_args)
             results = pipeline.run()
             print_completion_summary(results)
+            pair_colonies_across_views(results["output_dir"])
 
         return 0
 
@@ -201,7 +203,7 @@ def print_startup_banner():
 def print_completion_summary(results):
     """显示完成摘要"""
     if results:
-        print(f"\n✅ 分析完成!")
+        print("\n✅ 分析完成!")
         print(f"   检测菌落: {results.get('total_colonies', 0)} 个")
         print(f"   处理时间: {results.get('elapsed_time', 0):.2f} 秒")
         print(f"   输出目录: {results.get('output_dir', 'N/A')}")
