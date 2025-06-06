@@ -6,40 +6,40 @@
 
 
 detection:
-  model_type: vit_h                # SAM模型类型: vit_b, vit_l, vit_h
-  mode: hybrid                     # 检测模式: auto, grid, hybrid
-  min_colony_area: 500             # 最小菌落面积
-  max_colony_area: 50000           # 最大菌落面积
-  expand_pixels: 2                 # 掩码扩展像素数
-  adaptive_gradient_thresh: 30     # 自适应梯度阈值
-  adaptive_expand_iters: 15        # 自适应膨胀迭代次数
-  merge_overlapping: true          # 是否合并重叠菌落
-  overlap_threshold: 0.4           # 重叠阈值
-  use_preprocessing: true          # 是否使用图像预处理
-  background_filter: true          # 是否启用背景过滤
-  max_background_ratio: 0.20       # 最大背景占比阈值
-  edge_contact_limit: 0.5          # 边缘接触比例阈值
-  enable_edge_artifact_filter: true # 是否启用边缘伪影过滤
-  edge_margin_pixels: 20           # 边缘伪影检测的像素边距
-  enable_multi_stage: true         # 是否启用多阶段去重
-  high_quality_threshold: 0.85     # 高质量阈值（hybrid内部使用）
-  supplementary_threshold: 0.5     # 补充检测阈值
-  shape_regularity_min: 0.15        # 形状规整度最低阈值
-  duplicate_centroid_threshold: 30.0 # 去重时中心点距离阈值
-  duplicate_overlap_threshold: 0.5  # 去重时边界框重叠阈值
-  enable_duplicate_merging: true   # 是否启用重复合并
-  enable_adaptive_grid: true       # 启用自适应网格调整
-  sort_by_quality: true            # 按质量分数排序结果
-  min_quality_score: 0.2           # 最低质量分数阈值
-  min_colonies_expected: 30        # 预期最少菌落数（Hybrid模式）
-  max_mapping_distance: 0.5        # 最大映射距离（相对于孔位大小）
-  supplement_score_threshold: 0.5  # 补充检测的分数阈值
-  edge_margin_ratio: 0.08          # 边缘边距占比
-  cross_boundary_overlap_threshold: 0.1 # 跨界判定重叠阈值
-  mark_cross_boundary: true        # 是否标记跨界菌落
-  centroid_margin: 5               # fallback时中心点容差（像素）
-  min_roundness: 0.5               # 最小圆度阈值
-  max_aspect_ratio: 3.0            # 最大长宽比阈值
+  min_colony_area: 800
+  max_colony_area: 50000
+  expand_pixels: 2
+  adaptive_gradient_thresh: 20
+  adaptive_expand_iters: 25
+  merge_overlapping: true
+  overlap_threshold: 0.4
+  use_preprocessing: true
+  background_filter: false
+  max_background_ratio: 0.20
+  edge_contact_limit: 0.5
+  enable_edge_artifact_filter: true
+  edge_margin_pixels: 20
+  enable_multi_stage: true
+  high_quality_threshold: 0.85
+  supplementary_threshold: 0.5
+  shape_regularity_min: 0.15
+  duplicate_centroid_threshold: 15.0
+  duplicate_overlap_threshold: 0.5
+  enable_duplicate_merging: true
+  enable_adaptive_grid: true
+  sort_by_quality: true
+  min_quality_score: 0.2
+  min_colonies_expected: 30
+  max_mapping_distance: 0.5
+  supplement_score_threshold: 0.5
+  edge_margin_ratio: 0.08
+  cross_boundary_overlap_threshold: 0.1
+  mark_cross_boundary: true
+  centroid_margin: 5
+  min_roundness: 0.3
+  max_aspect_ratio: 3.0
+  growth_inhibited_ratio: 0.30
+  solidity_threshold: 0.70
 
 sam:
   points_per_side: 64            # 每边采样点数

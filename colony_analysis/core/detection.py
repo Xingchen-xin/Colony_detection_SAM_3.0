@@ -22,11 +22,11 @@ from ..utils.validation import ImageValidator, DataValidator
 class DetectionConfig:
     """检测配置数据类 - 完整版"""
     mode: str = 'auto'
-    min_colony_area: int = 500
+    min_colony_area: int = 400  # 更低阈值以允许较小/稀疏菌落合并为整体
     max_colony_area: int = 50000
     expand_pixels: int = 2
-    adaptive_gradient_thresh: int = 40   # 自适应梯度阈值
-    adaptive_expand_iters: int = 10      # 自适应膨胀迭代次数
+    adaptive_gradient_thresh: int = 15  # 允许在弱边缘区域扩展
+    adaptive_expand_iters: int = 35     # 增强区域聚合能力，尤其适合零散孢子
     merge_overlapping: bool = True
     use_preprocessing: bool = True
     overlap_threshold: float = 0.4
@@ -42,7 +42,7 @@ class DetectionConfig:
     supplementary_threshold: float = 0.6
     #max_background_ratio: float = 0.2
     #edge_contact_limit: float = 0.3
-    shape_regularity_min: float = 0.2
+    shape_regularity_min: float = 0.1   # 放宽形状规整度，保留不规则菌落区域
 
     # 去重相关参数
     duplicate_centroid_threshold: float = 30.0  # 中心点距离阈值
@@ -51,7 +51,7 @@ class DetectionConfig:
     # 增强功能开关
     enable_adaptive_grid: bool = True      # 启用自适应网格调整
     sort_by_quality: bool = True           # 按质量分数排序结果
-    min_quality_score: float = 0.3          # 最低质量分数阈值
+    min_quality_score: float = 0.15        # 避免低分菌落被提前过滤
 
     # Hybrid模式参数
     min_colonies_expected: int = 30       # 预期最少菌落数
@@ -67,10 +67,12 @@ class DetectionConfig:
     centroid_margin: int = 5
 
     # 新增：形状过滤参数
-    min_roundness: float = 0.5       # 最小圆度阈值
+    min_roundness: float = 0.2       # 放宽圆度限制以接受非典型边缘菌落
     max_aspect_ratio: float = 3.0    # 最大长宽比阈值
     # 最大灰度标准差阈值，用于纹理噪声过滤（越大越宽松）
     max_gray_std: float = 100.0
+    growth_inhibited_ratio: float = 0.30   # 面积比阈值，低于则标记为生长受阻
+    solidity_threshold: float = 0.70   # 凝固度阈值，低于则标记为生长受阻
 
 
 class ColonyDetector:
@@ -296,6 +298,34 @@ class ColonyDetector:
         # Step 3.5: 【新增】处理跨界菌落
         mapped_colonies = self._cross_boundary_colony_handling(
             mapped_colonies, plate_grid)
+
+        # ======== 标记生长受阻菌落 (growth_inhibited) ========
+        img_area = img.shape[0] * img.shape[1]
+        # 对于 96 孔板 (8x12)，每个孔的大致参考面积：
+        well_area_ref = img_area / (8 * 12)
+        for colony in mapped_colonies:
+            well_id = colony.get('well_position', '')
+            colony['growth_inhibited'] = False
+            if not well_id or well_id.startswith('unmapped'):
+                continue
+
+            current_area = colony.get('area', 0.0)
+            ratio = current_area / well_area_ref
+
+            # 计算凝固度（solidity）：轮廓面积 / 凸包面积
+            mask = colony.get('mask')
+            contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if contours:
+                cnt = max(contours, key=cv2.contourArea)
+                hull = cv2.convexHull(cnt)
+                hull_area = cv2.contourArea(hull)
+                solidity = current_area / (hull_area + 1e-6)
+            else:
+                solidity = 1.0
+
+            if ratio < self.config.growth_inhibited_ratio or solidity < self.config.solidity_threshold:
+                colony['growth_inhibited'] = True
+        # ======== 标记结束 ========
 
         # Step 4: 补充检测遗漏的孔位
         if len(mapped_colonies) < self.config.min_colonies_expected:
@@ -785,11 +815,11 @@ class ColonyDetector:
             return False
 
     def _filter_by_shape(self, mask: np.ndarray) -> bool:
-        """形状过滤：同时结合圆度与灰度纹理过滤裂痕/伪影"""
-        # 使用之前在 detect() 中保存的原始 RGB 图来计算灰度纹理
-        img = self._last_img
-        # 计算轮廓以获取圆度和长宽比
-        contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        """形状过滤：只检查圆度和长宽比，屏蔽灰度标准差过滤"""
+        # 1. 找到轮廓获取面积和周长
+        contours, _ = cv2.findContours(mask.astype(np.uint8),
+                                       cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             return False
         cnt = max(contours, key=cv2.contourArea)
@@ -797,31 +827,21 @@ class ColonyDetector:
         perimeter = cv2.arcLength(cnt, True)
         if perimeter == 0:
             return False
+        # 2. 计算圆度
         circularity = 4 * np.pi * area / (perimeter * perimeter + 1e-6)
-        # 使用配置中的圆度阈值
         if circularity < self.config.min_roundness:
             return False
 
-        # 计算最小外接矩形以获取长宽比
+        # 3. 计算长宽比
         rect = cv2.minAreaRect(cnt)
         width, height = rect[1]
         if min(width, height) <= 0:
             return False
         aspect_ratio = max(width, height) / min(width, height)
-        # 使用配置中的长宽比阈值
         if aspect_ratio > self.config.max_aspect_ratio:
             return False
 
-        # 如果有原始图，就做灰度纹理判定
-        if img is not None:
-            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-            ys, xs = np.where(mask > 0)
-            if len(ys) > 0:
-                region_vals = gray[ys, xs]
-                # 如果区域灰度标准差非常大，可能是裂痕/杂质
-                if np.std(region_vals) > self.config.max_gray_std:
-                    return False
-
+        # 4. 不再做灰度标准差过滤
         return True
 
 
@@ -1259,74 +1279,65 @@ class ColonyDetector:
 
 
     def _remove_duplicates(self, colonies: List[Dict]) -> List[Dict]:
-        """
-        移除重复的菌落 - 用于合并不同检测方法的结果
-        
+        """移除重复的菌落 - 用于合并不同检测方法的结果
+
         重复判定标准：
         1. 中心点距离小于阈值
         2. 边界框重叠超过阈值
-        3. 优先保留质量分数高的
+        3. 同簇内优先保留质量分数(sam_score)或面积较大的
         """
-        if len(colonies) <= 1:
+        if not colonies or not self.config.enable_duplicate_merging:
             return colonies
 
-        logging.info(f"去重前: {len(colonies)} 个菌落")
+        clusters = []  # 每个簇是一个 list，存放可能重复的候选
+        centroid_thresh = self.config.duplicate_centroid_threshold
+        overlap_thresh = self.config.duplicate_overlap_threshold
 
-        # 按质量分数排序，优先保留高质量的
-        def get_quality_score(colony):
-            # SAM分数
-            sam_score = colony.get('sam_score', 0.5)
-
-            # 检测方法优先级
-            method_priority = {
-                'sam_auto_refined': 1.0,
-                'sam_auto': 0.9,
-                'sam_grid': 0.8,
-                'hybrid_supplement': 0.7
-            }
-            method = colony.get('detection_method', 'unknown')
-            method_score = method_priority.get(method, 0.5)
-
-            # 面积合理性（假设理想面积在5000左右）
-            area = colony.get('area', 0)
-            area_score = 1.0 - abs(area - 5000) / 10000
-            area_score = max(0, min(1, area_score))
-
-            # 综合分数
-            return sam_score * 0.5 + method_score * 0.3 + area_score * 0.2
-
-        sorted_colonies = sorted(colonies, key=get_quality_score, reverse=True)
-
-        unique_colonies = []
-
-        for i, colony in enumerate(sorted_colonies):
-            is_duplicate = False
-
-            # 与已接受的菌落比较
-            for accepted in unique_colonies:
-                # 检查中心点距离
-                if self._check_centroid_distance(colony, accepted):
-                    is_duplicate = True
-                    logging.debug(
-                        f"菌落 {colony.get('id')} 与 {accepted.get('id')} 中心点过近")
+        for c in colonies:
+            c_centroid = np.array(c['centroid'])
+            assigned = False
+            # 尝试把 c 放入已有的簇里
+            for cluster in clusters:
+                for member in cluster:
+                    m_centroid = np.array(member['centroid'])
+                    dist = np.linalg.norm(c_centroid - m_centroid)
+                    # 计算 IoU
+                    x1a, y1a, x2a, y2a = member['bbox'][1], member['bbox'][0], member['bbox'][3], member['bbox'][2]
+                    x1b, y1b, x2b, y2b = c['bbox'][1], c['bbox'][0], c['bbox'][3], c['bbox'][2]
+                    inter_x1 = max(x1a, x1b)
+                    inter_y1 = max(y1a, y1b)
+                    inter_x2 = min(x2a, x2b)
+                    inter_y2 = min(y2a, y2b)
+                    inter_area = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
+                    area_a = (y2a - y1a) * (x2a - x1a)
+                    area_b = (y2b - y1b) * (x2b - x1b)
+                    union_area = area_a + area_b - inter_area if (area_a + area_b - inter_area) > 0 else 1
+                    iou = inter_area / union_area
+                    # 如果距阈值或 IoU 判定为重复，就加入当前簇
+                    if dist < centroid_thresh or iou > overlap_thresh:
+                        cluster.append(c)
+                        assigned = True
+                        break
+                if assigned:
                     break
+            if not assigned:
+                clusters.append([c])
 
-                # 检查边界框重叠
-                overlap = self._calculate_bbox_overlap(
-                    colony['bbox'], accepted['bbox'])
-                if overlap > 0.6:  # 60%重叠认为是重复
-                    is_duplicate = True
-                    logging.debug(
-                        f"菌落 {colony.get('id')} 与 {accepted.get('id')} 重叠 {overlap:.2f}")
-                    break
+        # 同簇内选出质量最高的（或面积最大的）
+        deduped = []
+        for cluster in clusters:
+            if len(cluster) == 1:
+                deduped.append(cluster[0])
+            else:
+                # 如果所有候选都带有 'sam_score' 字段，则按 sam_score 排序；否则按 area 排序
+                if all('sam_score' in x for x in cluster):
+                    best = max(cluster, key=lambda x: x['sam_score'])
+                else:
+                    best = max(cluster, key=lambda x: x.get('area', 0))
+                logging.debug(f"[去重簇] 原 candidates: {[c['id'] for c in cluster]} -> 保留 {best['id']}")
+                deduped.append(best)
 
-            if not is_duplicate:
-                unique_colonies.append(colony)
-
-        logging.info(
-            f"去重后: {len(unique_colonies)} 个菌落 (移除 {len(colonies) - len(unique_colonies)} 个)")
-
-        return unique_colonies
+        return deduped
 
     def _check_centroid_distance(self, colony1: Dict, colony2: Dict,
                                  threshold: float = 50.0) -> bool:
