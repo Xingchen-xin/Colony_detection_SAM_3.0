@@ -15,6 +15,9 @@ import sys
 import time
 from pathlib import Path
 
+from colony_analysis.pipeline import AnalysisPipeline, batch_medium_pipeline
+from colony_analysis.utils.file_utils import collect_all_images, parse_filename
+
 
 def parse_arguments():
     """解析命令行参数"""
@@ -105,6 +108,7 @@ def setup_logging(verbose=False):
     logging.info(f"日志记录到文件: {log_file}")
 
 
+
 def main():
     """主函数 - 保持简洁，主要负责流程协调"""
     try:
@@ -117,17 +121,18 @@ def main():
         # 显示启动信息
         print_startup_banner()
 
-        from colony_analysis.pipeline import AnalysisPipeline
-
         images = []
         if args.input_dir:
-            input_path = Path(args.input_dir)
-            if not input_path.is_dir():
-                raise NotADirectoryError(f"输入目录不存在: {args.input_dir}")
-            for ext in ["*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff"]:
-                images.extend(sorted(str(p) for p in input_path.glob(ext)))
-            if not images:
-                raise FileNotFoundError("在指定目录中未找到图像文件")
+            if args.interactive:
+                imgs = collect_all_images(args.input_dir)
+                if not imgs:
+                    raise FileNotFoundError("在指定目录中未找到图像文件")
+                print("即将处理以下图像:\n" + "\n".join(str(p) for p in imgs))
+                cont = input("继续? [y/N]: ").strip().lower()
+                if cont != "y":
+                    return 0
+            batch_medium_pipeline(args.input_dir, args.output)
+            return 0
         else:
             images = args.image
 
@@ -139,11 +144,31 @@ def main():
 
         for img in images:
             img_output = Path(args.output)
-            if len(images) > 1:
-                img_output = img_output / Path(img).stem
+            sample_name = medium = orientation = replicate = None
+            stem = Path(img).stem
+            # 根据文件名推断输出结构
+            try:
+                sample_name, medium, orientation, replicate = parse_filename(stem)
+            except Exception:
+                pass
+
+            if sample_name and medium and orientation:
+                img_output = (
+                    img_output
+                    / sample_name
+                    / medium.upper()
+                    / orientation.capitalize()
+                    / f"replicate_{replicate}"
+                )
+            elif len(images) > 1:
+                img_output = img_output / stem
+
             img_args = argparse.Namespace(**vars(args))
             img_args.image = img
             img_args.output = str(img_output)
+            img_args.medium = medium
+            img_args.orientation = orientation
+            img_args.replicate = replicate
             pipeline = AnalysisPipeline(img_args)
             results = pipeline.run()
             print_completion_summary(results)

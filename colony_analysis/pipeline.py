@@ -6,13 +6,28 @@ import logging
 import os
 import time
 from pathlib import Path
+from typing import Dict, List, Tuple
 
 import cv2
 
 from .analysis import ColonyAnalyzer
 from .config import ConfigManager
-from .core import ColonyDetector, SAMModel
-from .utils import ImageValidator, ResultManager, Visualizer
+from .core import (
+    ColonyDetector,
+    SAMModel,
+    r5_back_analysis,
+    r5_front_analysis,
+    mmm_back_analysis,
+    mmm_front_analysis,
+    combine_metrics,
+)
+from .utils import (
+    ImageValidator,
+    ResultManager,
+    Visualizer,
+    collect_all_images,
+    parse_filename,
+)
 
 
 class AnalysisPipeline:
@@ -94,6 +109,7 @@ class AnalysisPipeline:
         # 配置管理器
         self.config = ConfigManager(self.args.config)
         self.config.update_from_args(self.args)
+        self._apply_medium_specific_config()
 
         # SAM模型
         self.sam_model = SAMModel(model_type=self.args.model, config=self.config)
@@ -111,10 +127,27 @@ class AnalysisPipeline:
 
         # 分析器
         self.analyzer = ColonyAnalyzer(
-            sam_model=self.sam_model, config=self.config, debug=self.args.debug
+            sam_model=self.sam_model,
+            config=self.config,
+            debug=self.args.debug,
+            orientation=getattr(self.args, "orientation", "front"),
         )
 
         logging.info("组件初始化完成")
+
+    def _apply_medium_specific_config(self):
+        """根据培养基调整参数（示例占位实现）"""
+        medium = getattr(self.args, "medium", "").lower()
+        if medium == "r5":
+            # R5 培养基适当提高最小菌落面积阈值
+            self.config.detection.min_colony_area = max(
+                1500, self.config.detection.min_colony_area
+            )
+        elif medium == "mmm":
+            # MMM 培养基可能菌落更小
+            self.config.detection.min_colony_area = max(
+                1000, self.config.detection.min_colony_area // 2
+            )
 
     def _load_and_validate_image(self):
         """加载和验证图像"""
@@ -242,3 +275,114 @@ class AnalysisPipeline:
             "model": self.args.model,
             "advanced": self.args.advanced,
         }
+
+
+def batch_medium_pipeline(input_folder: str, output_folder: str):
+    """批量处理多培养基、多角度、多重复的图像"""
+    img_paths = collect_all_images(input_folder)
+    if not img_paths:
+        logging.warning(f"在 {input_folder} 未发现任何图片文件。")
+        return
+
+    from collections import defaultdict
+    groups: Dict[Tuple[str, str, str], Dict[str, Path]] = defaultdict(dict)
+
+    for img_path in img_paths:
+        sample_name, medium, orientation, replicate = parse_filename(img_path.stem)
+        key = (sample_name, medium, replicate)
+        groups[key][orientation] = img_path
+
+    summary_data: Dict[Tuple[str, str], List[Dict[str, float]]] = defaultdict(list)
+
+    for (sample_name, medium, replicate), ori_dict in groups.items():
+        if "front" not in ori_dict or "back" not in ori_dict:
+            logging.warning(
+                f"缺少 Front 或 Back 图像: {sample_name} replicate {replicate}"
+            )
+            continue
+
+        base_folder = (
+            Path(output_folder)
+            / sample_name
+            / medium.upper()
+            / f"replicate_{replicate}"
+        )
+        front_folder = base_folder / "Front"
+        back_folder = base_folder / "Back"
+        combined_folder = base_folder / "combined"
+        front_folder.mkdir(parents=True, exist_ok=True)
+        back_folder.mkdir(parents=True, exist_ok=True)
+        combined_folder.mkdir(parents=True, exist_ok=True)
+
+        try:
+            if medium == "r5":
+                r5_front_analysis(str(ori_dict["front"]), str(front_folder))
+                r5_back_analysis(str(ori_dict["back"]), str(back_folder))
+            elif medium == "mmm":
+                mmm_front_analysis(str(ori_dict["front"]), str(front_folder))
+                mmm_back_analysis(str(ori_dict["back"]), str(back_folder))
+            else:
+                logging.warning(f"未知培养基 '{medium}'，跳过 {sample_name}")
+                continue
+
+            logging.info(
+                f"已处理 {sample_name} replicate {replicate} ({medium.upper()})"
+            )
+        except Exception as e:
+            logging.error(
+                f"处理失败: {sample_name} replicate {replicate}, 错误: {e}"
+            )
+            continue
+
+        front_stats = front_folder / "stats_Front.txt"
+        back_stats = back_folder / "stats_Back.txt"
+        metrics = combine_metrics(str(front_stats), str(back_stats))
+        combined_path = combined_folder / "combined_stats.txt"
+        with open(combined_path, "w") as f:
+            for k, v in metrics.items():
+                f.write(f"{k}: {v}\n")
+
+        metrics_record = {"replicate": replicate}
+        metrics_record.update(metrics)
+        summary_data[(sample_name, medium)].append(metrics_record)
+
+    import csv
+    import statistics
+
+    for (sample_name, medium), records in summary_data.items():
+        if not records:
+            continue
+        summary_dir = (
+            Path(output_folder) / sample_name / medium.upper() / "summary"
+        )
+        summary_dir.mkdir(parents=True, exist_ok=True)
+
+        keys = [k for k in records[0].keys() if k != "replicate"]
+        csv_path = summary_dir / "all_replicates.csv"
+        with open(csv_path, "w", newline="") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=["replicate"] + keys)
+            writer.writeheader()
+            for rec in records:
+                writer.writerow(rec)
+
+        stats_path = summary_dir / "summary_stats.txt"
+        with open(stats_path, "w") as f:
+            for key in keys:
+                values = [rec[key] for rec in records if key in rec]
+                mean = sum(values) / len(values)
+                std = statistics.stdev(values) if len(values) > 1 else 0.0
+                f.write(f"{key}: mean={mean}, std={std}\n")
+
+    logging.info("批量处理完成。")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="批量处理 R5/MMM 多角度、多重复的图像"
+    )
+    parser.add_argument("-i", "--input", required=True, help="原始图片根目录")
+    parser.add_argument("-o", "--output", required=True, help="分析结果输出根目录")
+    args = parser.parse_args()
+    batch_medium_pipeline(args.input, args.output)
