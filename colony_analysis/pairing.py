@@ -7,6 +7,8 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+from tqdm import tqdm
+
 
 def load_colony_data(folder: Path) -> List[Dict]:
     """Load colony_*.json files from the given folder."""
@@ -93,12 +95,10 @@ def pair_colonies_across_views(output_dir: str, max_distance: float = 50.0):
     if root.parent.name in {"Front", "Back"} and root.name.startswith("replicate_"):
         root = root.parents[4]
 
-    for sample_dir in root.iterdir():
-        if not sample_dir.is_dir():
-            continue
-        for medium_dir in sample_dir.iterdir():
-            if not medium_dir.is_dir():
-                continue
+    start_all = time.time()
+    sample_dirs = [d for d in root.iterdir() if d.is_dir()]
+    for sample_dir in tqdm(sample_dirs, desc="Pair samples", ncols=80):
+        for medium_dir in [d for d in sample_dir.iterdir() if d.is_dir()]:
             front_root = medium_dir / "Front"
             back_root = medium_dir / "Back"
             replicates = set()
@@ -106,8 +106,8 @@ def pair_colonies_across_views(output_dir: str, max_distance: float = 50.0):
                 replicates.update(p.name for p in front_root.iterdir() if p.is_dir())
             if back_root.exists():
                 replicates.update(p.name for p in back_root.iterdir() if p.is_dir())
-
-            for rep in replicates:
+            for rep in tqdm(sorted(replicates), desc=f"{sample_dir.name}-{medium_dir.name}", leave=False, ncols=80):
+                step_start = time.time()
                 front_dir = front_root / rep
                 back_dir = back_root / rep
                 front_data = load_colony_data(front_dir)
@@ -125,7 +125,10 @@ def pair_colonies_across_views(output_dir: str, max_distance: float = 50.0):
 
                 save_folder = medium_dir / "paired" / rep
                 save_merged_results(save_folder, merged)
+                elapsed = time.time() - step_start
                 logging.info(
-                    f"配对完成: {sample_dir.name} {medium_dir.name} {rep}, 共 {len(merged)} 条"
+                    f"配对完成: {sample_dir.name} {medium_dir.name} {rep}, 共 {len(merged)} 条 - {elapsed:.2f}s"
                 )
+    total_elapsed = time.time() - start_all
+    logging.info(f"配对处理完成，总耗时 {total_elapsed:.2f}s")
 
