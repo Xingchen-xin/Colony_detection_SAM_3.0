@@ -13,6 +13,7 @@ import logging
 import sys
 import time
 from pathlib import Path
+from tqdm import tqdm
 
 from colony_analysis.pipeline import AnalysisPipeline, batch_medium_pipeline
 from colony_analysis.pairing import pair_colonies_across_views
@@ -81,18 +82,30 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def setup_logging(verbose=False):
-    """配置日志系统"""
-    level = logging.DEBUG if verbose else logging.INFO
-    format_str = "%(asctime)s - %(levelname)s - %(message)s"
+def setup_logging(verbose: bool = False) -> None:
+    """配置日志系统并与 ``tqdm`` 进度条兼容"""
 
-    logging.basicConfig(
-        level=level,
-        format=format_str,
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-        ],
-    )
+    class TqdmHandler(logging.StreamHandler):
+        """自定义处理器，使用 ``tqdm.write`` 输出日志，避免打断进度条"""
+
+        def emit(self, record: logging.LogRecord) -> None:  # type: ignore[override]
+            try:
+                msg = self.format(record)
+                tqdm.write(msg)
+                self.flush()
+            except Exception:
+                self.handleError(record)
+
+    level = logging.DEBUG if verbose else logging.INFO
+    fmt = "%(asctime)s - %(levelname)s - %(message)s"
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    root.handlers.clear()
+
+    console_handler = TqdmHandler(sys.stdout)
+    console_handler.setFormatter(logging.Formatter(fmt))
+    root.addHandler(console_handler)
 
     # 创建文件日志处理器
     log_dir = Path("logs")
@@ -102,8 +115,8 @@ def setup_logging(verbose=False):
     log_file = log_dir / f"colony_analysis_{timestamp}.log"
 
     file_handler = logging.FileHandler(log_file)
-    file_handler.setFormatter(logging.Formatter(format_str))
-    logging.getLogger().addHandler(file_handler)
+    file_handler.setFormatter(logging.Formatter(fmt))
+    root.addHandler(file_handler)
 
     logging.info(f"日志记录到文件: {log_file}")
 

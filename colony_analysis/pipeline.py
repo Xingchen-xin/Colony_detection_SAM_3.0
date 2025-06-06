@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+from tqdm import tqdm
+
 import cv2
 
 from .analysis import ColonyAnalyzer
@@ -286,7 +288,12 @@ def batch_medium_pipeline(input_folder: str, output_folder: str):
 
     summary_data: Dict[Tuple[str, str], List[Dict[str, float]]] = defaultdict(list)
 
-    for (sample_name, medium, replicate), ori_dict in groups.items():
+    start_all = time.time()
+    group_items = list(groups.items())
+    for (sample_name, medium, replicate), ori_dict in tqdm(
+        group_items, desc="Batch processing", ncols=80
+    ):
+        step_start = time.time()
         base_folder = (
             Path(output_folder)
             / sample_name
@@ -332,8 +339,9 @@ def batch_medium_pipeline(input_folder: str, output_folder: str):
                     f"{sample_name} replicate {replicate} 缺少 Front/Back 图像，跳过"
                 )
 
+            elapsed = time.time() - step_start
             logging.info(
-                f"已处理 {sample_name} replicate {replicate} ({medium.upper()})"
+                f"已处理 {sample_name} replicate {replicate} ({medium.upper()}) - {elapsed:.2f}s"
             )
         except Exception as e:
             logging.error(
@@ -381,7 +389,8 @@ def batch_medium_pipeline(input_folder: str, output_folder: str):
                 std = statistics.stdev(values) if len(values) > 1 else 0.0
                 f.write(f"{key}: mean={mean}, std={std}\n")
 
-    logging.info("批量处理完成。")
+    total_elapsed = time.time() - start_all
+    logging.info(f"批量处理完成，总耗时 {total_elapsed:.2f}s")
 
 
 if __name__ == "__main__":

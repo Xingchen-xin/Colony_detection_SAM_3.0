@@ -5,6 +5,7 @@ import platform
 import sys
 import time
 from pathlib import Path
+from tqdm import tqdm
 
 
 class LogManager:
@@ -46,8 +47,19 @@ class LogManager:
         for handler in root_logger.handlers[:]:
             root_logger.removeHandler(handler)
 
+        class TqdmHandler(logging.StreamHandler):
+            """使用 ``tqdm.write`` 输出日志，避免干扰进度条"""
+
+            def emit(self, record: logging.LogRecord) -> None:  # type: ignore[override]
+                try:
+                    msg = self.format(record)
+                    tqdm.write(msg)
+                    self.flush()
+                except Exception:
+                    self.handleError(record)
+
         # 添加控制台处理程序
-        console_handler = logging.StreamHandler()
+        console_handler = TqdmHandler()
         console_handler.setFormatter(logging.Formatter(console_format))
         root_logger.addHandler(console_handler)
 
