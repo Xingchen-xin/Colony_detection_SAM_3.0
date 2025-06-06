@@ -18,6 +18,8 @@ python main.py --input-dir Image_input --output results
 cd colony_analysis
 python pipeline.py -i ../Image_input -o ../results
 ```
+- 批处理过程会显示实时进度条和每一步耗时，便于跟踪整体进度。
+- 日志输出与进度条兼容，调试信息不会打断动态进度显示。
 
 ### 文件名解析规则
 图像文件名需包含样本名称、培养基、拍摄角度以及可选的重复编号：
