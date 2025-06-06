@@ -1,6 +1,7 @@
 """Utilities for pairing front and back colony results."""
-import time
 from __future__ import annotations
+
+import time
 
 import json
 import logging
@@ -11,11 +12,21 @@ from tqdm import tqdm
 
 
 def load_colony_data(folder: Path) -> List[Dict]:
-    """Load colony_*.json files from the given folder."""
+    """Load colony data from a result folder."""
     colonies: List[Dict] = []
     if not folder.exists() or not folder.is_dir():
         return colonies
 
+    detailed = folder / "results" / "detailed_results.json"
+    if detailed.exists():
+        try:
+            with open(detailed, "r", encoding="utf-8") as f:
+                colonies = json.load(f)
+        except Exception as e:
+            logging.error(f"读取菌落数据失败: {detailed}: {e}")
+        return colonies
+
+    # Fallback to individual colony_*.json files
     for json_file in sorted(folder.glob("colony_*.json")):
         try:
             with open(json_file, "r", encoding="utf-8") as f:
@@ -88,47 +99,76 @@ def match_and_merge_colonies(
 
 
 def pair_colonies_across_views(output_dir: str, max_distance: float = 50.0):
-    """Pair colonies from front and back results under the given output directory."""
+    """Pair colonies from front and back results under ``output_dir``."""
 
     root = Path(output_dir).resolve()
-    # If called with orientation/replicate path, strip to root
-    if root.parent.name in {"Front", "Back"} and root.name.startswith("replicate_"):
-        root = root.parents[4]
+
+    # If a replicate or orientation directory is provided, handle it directly
+    if root.name in {"Front", "Back"}:
+        replicate_dir = root.parent
+    elif root.name.startswith("replicate_"):
+        replicate_dir = root
+    else:
+        replicate_dir = None
+
+    if replicate_dir:
+        front_data = load_colony_data(replicate_dir / "Front")
+        back_data = load_colony_data(replicate_dir / "Back")
+
+        if not front_data and not back_data:
+            logging.warning(f"{replicate_dir} 缺少前后视角数据，跳过配对")
+            return
+
+        if not front_data or not back_data:
+            logging.warning(f"{replicate_dir.name} 缺少一侧图像结果")
+
+        merged = match_and_merge_colonies(front_data, back_data, max_distance)
+        save_folder = replicate_dir / "Combined" / "results"
+        save_merged_results(save_folder, merged)
+        logging.info(
+            f"配对完成: {replicate_dir.name}, 共 {len(merged)} 条")
+        return
+
+    # Otherwise treat as the root output directory and iterate all samples
 
     start_all = time.time()
     sample_dirs = [d for d in root.iterdir() if d.is_dir()]
     for sample_dir in tqdm(sample_dirs, desc="Pair samples", ncols=80):
         for medium_dir in [d for d in sample_dir.iterdir() if d.is_dir()]:
-            front_root = medium_dir / "Front"
-            back_root = medium_dir / "Back"
-            replicates = set()
-            if front_root.exists():
-                replicates.update(p.name for p in front_root.iterdir() if p.is_dir())
-            if back_root.exists():
-                replicates.update(p.name for p in back_root.iterdir() if p.is_dir())
-            for rep in tqdm(sorted(replicates), desc=f"{sample_dir.name}-{medium_dir.name}", leave=False, ncols=80):
-                step_start = time.time()
-                front_dir = front_root / rep
-                back_dir = back_root / rep
-                front_data = load_colony_data(front_dir)
-                back_data = load_colony_data(back_dir)
+            for date_dir in [d for d in medium_dir.iterdir() if d.is_dir()]:
+                replicate_dirs = [
+                    r
+                    for r in date_dir.iterdir()
+                    if r.is_dir() and r.name.startswith("replicate_")
+                ]
+                for rep_dir in tqdm(
+                    sorted(replicate_dirs),
+                    desc=f"{sample_dir.name}-{medium_dir.name}-{date_dir.name}",
+                    leave=False,
+                    ncols=80,
+                ):
+                    step_start = time.time()
+                    front_dir = rep_dir / "Front"
+                    back_dir = rep_dir / "Back"
+                    front_data = load_colony_data(front_dir)
+                    back_data = load_colony_data(back_dir)
 
-                if not front_data and not back_data:
-                    continue
+                    if not front_data and not back_data:
+                        continue
 
-                if not front_data or not back_data:
-                    logging.warning(
-                        f"{sample_dir.name} {medium_dir.name} {rep} 缺少一侧图像结果"
+                    if not front_data or not back_data:
+                        logging.warning(
+                            f"{sample_dir.name} {medium_dir.name} {rep_dir.name} 缺少一侧图像结果"
+                        )
+
+                    merged = match_and_merge_colonies(front_data, back_data, max_distance)
+
+                    save_folder = rep_dir / "Combined" / "results"
+                    save_merged_results(save_folder, merged)
+                    elapsed = time.time() - step_start
+                    logging.info(
+                        f"配对完成: {sample_dir.name} {medium_dir.name} {rep_dir.name}, 共 {len(merged)} 条 - {elapsed:.2f}s"
                     )
-
-                merged = match_and_merge_colonies(front_data, back_data, max_distance)
-
-                save_folder = medium_dir / "paired" / rep
-                save_merged_results(save_folder, merged)
-                elapsed = time.time() - step_start
-                logging.info(
-                    f"配对完成: {sample_dir.name} {medium_dir.name} {rep}, 共 {len(merged)} 条 - {elapsed:.2f}s"
-                )
     total_elapsed = time.time() - start_all
     logging.info(f"配对处理完成，总耗时 {total_elapsed:.2f}s")
 

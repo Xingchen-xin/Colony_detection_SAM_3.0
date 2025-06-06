@@ -486,11 +486,13 @@ def batch_medium_pipeline(input_folder: str, output_folder: str):
             # --- Use actual AnalysisPipeline for each orientation ---
             from argparse import Namespace
             from .pipeline import AnalysisPipeline
+            output_paths: Dict[str, str] = {}
             for orientation in ["front", "back"]:
                 if orientation in ori_dict:
                     image_path = str(ori_dict[orientation])
                     view_type = "Front" if orientation == "front" else "Back"
                     output_path = get_output_path(output_folder, image_path, replicate, view_type)
+                    output_paths[orientation] = output_path
                     args = Namespace(
                         image=image_path,
                         input=None,
@@ -507,6 +509,13 @@ def batch_medium_pipeline(input_folder: str, output_folder: str):
                     )
                     pipeline = AnalysisPipeline(args)
                     pipeline.run()
+            # Automatically pair front/back results if both present
+            if "front" in output_paths and "back" in output_paths:
+                try:
+                    from colony_analysis.pairing import pair_colonies_across_views
+                    pair_colonies_across_views(Path(output_paths["front"]).parent)
+                except Exception as e:
+                    logging.error(f"配对前后视图失败: {e}")
             if "front" not in ori_dict and "back" not in ori_dict:
                 logging.warning(
                     f"{sample_name} replicate {replicate} 缺少 Front/Back 图像，跳过"
