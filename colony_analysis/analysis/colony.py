@@ -3,9 +3,9 @@
 # ============================================================================
 
 import logging
-import numpy as np
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
 
+import numpy as np
 from tqdm import tqdm
 
 from ..core.sam_model import SAMModel
@@ -16,7 +16,9 @@ from .scoring import ScoringSystem
 class ColonyAnalyzer:
     """菌落分析器 - 提取特征并进行评分分类"""
 
-    def __init__(self, sam_model: Optional[SAMModel] = None, config=None, debug: bool = False):
+    def __init__(
+        self, sam_model: Optional[SAMModel] = None, config=None, debug: bool = False
+    ):
         """初始化菌落分析器"""
         self.sam_model = sam_model
         self.config = config
@@ -30,9 +32,9 @@ class ColonyAnalyzer:
     def _init_feature_extractors(self):
         """初始化特征提取器"""
         self.feature_extractors = [
-            FeatureExtractor(extractor_type='basic', debug=self.debug),
-            FeatureExtractor(extractor_type='aerial', debug=self.debug),
-            FeatureExtractor(extractor_type='metabolite', debug=self.debug)
+            FeatureExtractor(extractor_type="basic", debug=self.debug),
+            FeatureExtractor(extractor_type="aerial", debug=self.debug),
+            FeatureExtractor(extractor_type="metabolite", debug=self.debug),
         ]
 
     def analyze(self, colonies: List[Dict], advanced: bool = False) -> List[Dict]:
@@ -57,47 +59,48 @@ class ColonyAnalyzer:
     def analyze_colony(self, colony: Dict, advanced: bool = False) -> Dict:
         """分析单个菌落"""
         # 确保有基本数据结构
-        if 'features' not in colony:
-            colony['features'] = {}
-        if 'scores' not in colony:
-            colony['scores'] = {}
-        if 'phenotype' not in colony:
-            colony['phenotype'] = {}
+        if "features" not in colony:
+            colony["features"] = {}
+        if "scores" not in colony:
+            colony["scores"] = {}
+        if "phenotype" not in colony:
+            colony["phenotype"] = {}
 
         # 检查必要的字段
-        if 'img' not in colony or 'mask' not in colony:
+        if "img" not in colony or "mask" not in colony:
             logging.warning(f"菌落 {colony.get('id', 'unknown')} 缺少图像或掩码数据")
             return colony
 
         # 提取特征
         for extractor in self.feature_extractors:
-            features = extractor.extract(colony['img'], colony['mask'])
-            colony['features'].update(features)
+            features = extractor.extract(colony["img"], colony["mask"])
+            colony["features"].update(features)
 
         # 计算评分
-        scores = self.scoring_system.calculate_scores(colony['features'])
-        colony['scores'].update(scores)
+        scores = self.scoring_system.calculate_scores(colony["features"])
+        colony["scores"].update(scores)
 
         # 分类表型
-        phenotype = self.scoring_system.classify_phenotype(colony['features'])
-        colony['phenotype'].update(phenotype)
+        phenotype = self.scoring_system.classify_phenotype(colony["features"])
+        colony["phenotype"].update(phenotype)
 
         # 高级分析
         if advanced and self.sam_model is not None:
             self._perform_advanced_analysis(colony)
 
         # 使用质量分数进行加权
-        quality = colony.get('quality_score', 0.5)
+        quality = colony.get("quality_score", 0.5)
         if quality < 0.3:
             logging.warning(f"低质量菌落: {colony['id']}")
 
         # 处理跨界情况
-        if colony.get('cross_boundary', False):
-            colony['phenotype']['special_case'] = 'cross_boundary'
+        if colony.get("cross_boundary", False):
+            colony["phenotype"]["special_case"] = "cross_boundary"
             # 将列表转换为逗号分隔的字符串
-            affected_wells = colony.get('overlapping_wells', [])
-            colony['phenotype']['affected_wells'] = ', '.join(
-            affected_wells) if affected_wells else 'none'
+            affected_wells = colony.get("overlapping_wells", [])
+            colony["phenotype"]["affected_wells"] = (
+                ", ".join(affected_wells) if affected_wells else "none"
+            )
         return colony
 
     def _perform_advanced_analysis(self, colony: Dict):
@@ -105,21 +108,20 @@ class ColonyAnalyzer:
         try:
             # 检测扩散区域
             diffusion_mask = self.sam_model.find_diffusion_zone(
-                colony['img'], colony['mask']
+                colony["img"], colony["mask"]
             )
 
-            if 'advanced_masks' not in colony:
-                colony['advanced_masks'] = {}
+            if "advanced_masks" not in colony:
+                colony["advanced_masks"] = {}
 
-            colony['advanced_masks']['diffusion'] = diffusion_mask
+            colony["advanced_masks"]["diffusion"] = diffusion_mask
 
             # 计算扩散特征
             diffusion_area = np.sum(diffusion_mask)
-            colony_area = np.sum(colony['mask'])
+            colony_area = np.sum(colony["mask"])
             diffusion_ratio = diffusion_area / colony_area if colony_area > 0 else 0
 
-            colony['features']['metabolite_diffusion_ratio'] = float(
-                diffusion_ratio)
+            colony["features"]["metabolite_diffusion_ratio"] = float(diffusion_ratio)
 
         except Exception as e:
             logging.error(f"高级分析失败: {e}")

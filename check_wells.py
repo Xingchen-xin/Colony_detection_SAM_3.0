@@ -3,14 +3,15 @@
 检查特定孔位的菌落检测情况
 """
 
-import cv2
-import numpy as np
-import matplotlib.pyplot as plt
 import argparse
 from pathlib import Path
 
+import cv2
+import matplotlib.pyplot as plt
+import numpy as np
 
-def check_specific_wells(image_path, result_dir, wells_to_check=['E6', 'H12']):
+
+def check_specific_wells(image_path, result_dir, wells_to_check=["E6", "H12"]):
     """检查特定孔位的检测情况"""
 
     # 加载图像
@@ -34,28 +35,40 @@ def check_specific_wells(image_path, result_dir, wells_to_check=['E6', 'H12']):
 
     # 显示全图
     axes[0].imshow(img_rgb)
-    axes[0].set_title('Full Image with Target Wells')
+    axes[0].set_title("Full Image with Target Wells")
 
     # 标记目标孔位
     for well_id in wells_to_check:
-        row_idx = ord(well_id[0]) - ord('A')
+        row_idx = ord(well_id[0]) - ord("A")
         col_idx = int(well_id[1:]) - 1
 
         center_y = margin_y + (row_idx + 0.5) * cell_height
         center_x = margin_x + (col_idx + 0.5) * cell_width
 
         # 在全图上标记
-        rect = plt.Rectangle((center_x - cell_width/2, center_y - cell_height/2),
-                             cell_width, cell_height,
-                             fill=False, color='red', linewidth=3)
+        rect = plt.Rectangle(
+            (center_x - cell_width / 2, center_y - cell_height / 2),
+            cell_width,
+            cell_height,
+            fill=False,
+            color="red",
+            linewidth=3,
+        )
         axes[0].add_patch(rect)
-        axes[0].text(center_x, center_y, well_id,
-                     color='red', fontsize=16, ha='center', va='center',
-                     bbox=dict(boxstyle="round,pad=0.3", facecolor='yellow', alpha=0.7))
+        axes[0].text(
+            center_x,
+            center_y,
+            well_id,
+            color="red",
+            fontsize=16,
+            ha="center",
+            va="center",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.7),
+        )
 
     # 显示每个孔位的放大图
     for i, well_id in enumerate(wells_to_check):
-        row_idx = ord(well_id[0]) - ord('A')
+        row_idx = ord(well_id[0]) - ord("A")
         col_idx = int(well_id[1:]) - 1
 
         center_y = int(margin_y + (row_idx + 0.5) * cell_height)
@@ -63,45 +76,57 @@ def check_specific_wells(image_path, result_dir, wells_to_check=['E6', 'H12']):
 
         # 提取孔位区域（稍微扩大一点）
         pad = int(min(cell_height, cell_width) * 0.2)
-        y1 = max(0, int(center_y - cell_height/2 - pad))
-        y2 = min(h, int(center_y + cell_height/2 + pad))
-        x1 = max(0, int(center_x - cell_width/2 - pad))
-        x2 = min(w, int(center_x + cell_width/2 + pad))
+        y1 = max(0, int(center_y - cell_height / 2 - pad))
+        y2 = min(h, int(center_y + cell_height / 2 + pad))
+        x1 = max(0, int(center_x - cell_width / 2 - pad))
+        x2 = min(w, int(center_x + cell_width / 2 + pad))
 
         well_img = img_rgb[y1:y2, x1:x2]
 
-        axes[i+1].imshow(well_img)
-        axes[i+1].set_title(f'Well {well_id}')
+        axes[i + 1].imshow(well_img)
+        axes[i + 1].set_title(f"Well {well_id}")
 
         # 标记中心点
         local_center_y = center_y - y1
         local_center_x = center_x - x1
-        axes[i+1].plot(local_center_x, local_center_y, 'r+',
-                       markersize=20, markeredgewidth=3)
+        axes[i + 1].plot(
+            local_center_x, local_center_y, "r+", markersize=20, markeredgewidth=3
+        )
 
         # 显示搜索半径
         search_radius = min(cell_height, cell_width) * 0.6
-        circle = plt.Circle((local_center_x, local_center_y), search_radius,
-                            fill=False, color='yellow', linewidth=2)
-        axes[i+1].add_patch(circle)
+        circle = plt.Circle(
+            (local_center_x, local_center_y),
+            search_radius,
+            fill=False,
+            color="yellow",
+            linewidth=2,
+        )
+        axes[i + 1].add_patch(circle)
 
         # 扩展搜索半径
         extended_radius = search_radius * 1.5
-        circle2 = plt.Circle((local_center_x, local_center_y), extended_radius,
-                             fill=False, color='orange', linewidth=2, linestyle='--')
-        axes[i+1].add_patch(circle2)
+        circle2 = plt.Circle(
+            (local_center_x, local_center_y),
+            extended_radius,
+            fill=False,
+            color="orange",
+            linewidth=2,
+            linestyle="--",
+        )
+        axes[i + 1].add_patch(circle2)
 
     plt.tight_layout()
 
     # 保存图像
-    output_path = Path(result_dir) / 'well_check.png'
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    output_path = Path(result_dir) / "well_check.png"
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
     print(f"✅ 检查结果保存到: {output_path}")
 
     # 分析这些位置的图像特征
     print("\n分析目标孔位的图像特征：")
     for well_id in wells_to_check:
-        row_idx = ord(well_id[0]) - ord('A')
+        row_idx = ord(well_id[0]) - ord("A")
         col_idx = int(well_id[1:]) - 1
 
         center_y = int(margin_y + (row_idx + 0.5) * cell_height)
@@ -123,7 +148,8 @@ def check_specific_wells(image_path, result_dir, wells_to_check=['E6', 'H12']):
         # 检查是否有菌落（简单的阈值检测）
         gray_region = cv2.cvtColor(region, cv2.COLOR_RGB2GRAY)
         _, binary = cv2.threshold(
-            gray_region, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            gray_region, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
         white_ratio = np.sum(binary == 255) / binary.size
 
         print(f"\n{well_id}:")
@@ -139,12 +165,16 @@ def check_specific_wells(image_path, result_dir, wells_to_check=['E6', 'H12']):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='检查特定孔位的菌落检测情况')
-    parser.add_argument('--image', '-i', required=True, help='输入图像路径')
+    parser = argparse.ArgumentParser(description="检查特定孔位的菌落检测情况")
+    parser.add_argument("--image", "-i", required=True, help="输入图像路径")
+    parser.add_argument("--output", "-o", default="well_check_output", help="输出目录")
     parser.add_argument(
-        '--output', '-o', default='well_check_output', help='输出目录')
-    parser.add_argument('--wells', '-w', nargs='+', default=['E6', 'H12'],
-                        help='要检查的孔位列表（默认: E6 H12）')
+        "--wells",
+        "-w",
+        nargs="+",
+        default=["E6", "H12"],
+        help="要检查的孔位列表（默认: E6 H12）",
+    )
 
     args = parser.parse_args()
 
