@@ -17,12 +17,17 @@ class ColonyAnalyzer:
     """菌落分析器 - 提取特征并进行评分分类"""
 
     def __init__(
-        self, sam_model: Optional[SAMModel] = None, config=None, debug: bool = False
+        self,
+        sam_model: Optional[SAMModel] = None,
+        config=None,
+        debug: bool = False,
+        orientation: str = "front",
     ):
         """初始化菌落分析器"""
         self.sam_model = sam_model
         self.config = config
         self.debug = debug
+        self.orientation = orientation.lower() if orientation else "front"
         self.feature_extractors = []
         self.scoring_system = ScoringSystem()
         self._init_feature_extractors()
@@ -31,11 +36,18 @@ class ColonyAnalyzer:
 
     def _init_feature_extractors(self):
         """初始化特征提取器"""
-        self.feature_extractors = [
-            FeatureExtractor(extractor_type="basic", debug=self.debug),
-            FeatureExtractor(extractor_type="aerial", debug=self.debug),
-            FeatureExtractor(extractor_type="metabolite", debug=self.debug),
-        ]
+        if self.orientation == "back":
+            # 背面图像主要分析色素产物
+            self.feature_extractors = [
+                FeatureExtractor(extractor_type="basic", debug=self.debug),
+                FeatureExtractor(extractor_type="metabolite", debug=self.debug),
+            ]
+        else:
+            # 正面图像关注形态和气生菌丝
+            self.feature_extractors = [
+                FeatureExtractor(extractor_type="basic", debug=self.debug),
+                FeatureExtractor(extractor_type="aerial", debug=self.debug),
+            ]
 
     def analyze(self, colonies: List[Dict], advanced: bool = False) -> List[Dict]:
         """分析菌落列表"""
