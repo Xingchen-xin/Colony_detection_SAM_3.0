@@ -40,7 +40,6 @@ class AnalysisPipeline:
     def run(self):
         """运行完整的分析流程"""
         self.start_time = time.time()
-
         try:
             # 1. 初始化组件
             self._initialize_components()
@@ -55,8 +54,13 @@ class AnalysisPipeline:
                     img_rgb.shape[:2]
                 )
             # -------- 新增结束 ------
+
             # 3. 执行检测
-            colonies = self._detect_colonies(img_rgb)
+            if getattr(self.args, "force_96plate_detection", False):
+                # 强制96孔板检测模式
+                colonies = self._force_96plate_detection(img_rgb)
+            else:
+                colonies = self._detect_colonies(img_rgb)
 
             # —— 如果是 hybrid 模式，检测器内部已经将每个 colony 对应到 well_position，
             #    此处额外汇总哪些孔位漏检 ——
@@ -86,15 +90,177 @@ class AnalysisPipeline:
             # 5. 执行分析
             analyzed_colonies = self._analyze_colonies(colonies)
 
-            # 6. 保存结果
+            # 6. 离群值检测
+            if getattr(self.args, "outlier_detection", False):
+                try:
+                    import pandas as pd
+                    from colony_analysis.outlier import detect_outliers
+                    df = pd.DataFrame(analyzed_colonies)
+                    metric = getattr(self.args, "outlier_metric", "area")
+                    threshold = getattr(self.args, "outlier_threshold", 3.0)
+                    df_out = detect_outliers(df, metric=metric, threshold=threshold)
+                    # 更新 analyzed_colonies
+                    analyzed_colonies = df_out.to_dict(orient="records")
+                except Exception as e:
+                    logging.error(f"离群值检测失败: {e}")
+
+            # 7. 保存结果
             self._save_results(analyzed_colonies, img_rgb)
 
-            # 7. 返回结果摘要
+            # 8. 返回结果摘要
             return self._generate_summary(analyzed_colonies)
 
         except Exception as e:
             logging.error(f"分析管道执行失败: {e}")
             raise
+
+    def _force_96plate_detection(self, img_rgb):
+        """
+        强制96孔板检测：对每个预设孔位区域内查找候选菌落，输出96个条目（无菌落填推测/补全信息）
+        新增支持推测未生长菌落的可视化与数据补全。
+        """
+        import numpy as np
+        from copy import deepcopy
+        import cv2
+        from PIL import Image, ImageDraw, ImageFont
+
+        # 获取plate_grid: well_id -> (row, col, cx, cy, r)
+        plate_grid = self.config.plate_grid
+        # 1. 检测所有菌落
+        colonies = self.detector.detect(img_rgb, mode="grid")
+        # 2. 分配菌落到最近well_id
+        well_to_candidates = {well: [] for well in plate_grid}
+        for c in colonies:
+            centroid = c.get("centroid", None)
+            if centroid is None:
+                continue
+            cy, cx = centroid
+            # 找到最近的well
+            min_dist = float("inf")
+            min_well = None
+            for well_id, (row, col, wx, wy, wr) in plate_grid.items():
+                d = np.hypot(cx - wx, cy - wy)
+                if d < min_dist and d < wr * 1.5:  # 允许一定范围
+                    min_dist = d
+                    min_well = well_id
+            if min_well is not None:
+                well_to_candidates[min_well].append(c)
+        # 3. 统计所有已检测菌落的半径
+        detected_colonies = []
+        for candlist in well_to_candidates.values():
+            detected_colonies.extend(candlist)
+        # 取所有菌落的半径
+        radii = []
+        for c in detected_colonies:
+            if "radius" in c:
+                radii.append(c["radius"])
+            elif "mask" in c:
+                # 估算半径
+                area = np.sum(c["mask"] > 0)
+                radii.append(np.sqrt(area / np.pi))
+        median_radius = np.median(radii) if radii else 25  # default_radius
+        # 4. 遍历每个孔位，输出菌落或推测未生长
+        forced_colonies = []
+        fallback_policy = getattr(self.args, "fallback_null_policy", "fill")
+        # 用于可视化的输出图像副本
+        vis_img = img_rgb.copy()
+        # 用于PIL标注
+        pil_img = Image.fromarray(vis_img)
+        draw = ImageDraw.Draw(pil_img)
+        # 尝试加载字体
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", 18)
+        except Exception:
+            font = None
+        for well_id in sorted(plate_grid.keys()):
+            candidates = well_to_candidates[well_id]
+            # 获取理论孔位中心与半径
+            row, col, wx, wy, wr = plate_grid[well_id]
+            wx, wy = int(wx), int(wy)
+            est_radius = int(median_radius)
+            est_area = float(np.pi * (est_radius ** 2))
+            if candidates:
+                # 按分数或面积排序，选取最佳
+                best = max(candidates, key=lambda cc: cc.get("scores", {}).get("overall_score", 0) if "scores" in cc else cc.get("area", 0))
+                best = deepcopy(best)
+                best["well_position"] = well_id
+                best["forced_96plate"] = True
+                # 标记状态
+                best["colony_status"] = "detected"
+                best["growth_status"] = "normal"
+                forced_colonies.append(best)
+            else:
+                if fallback_policy == "skip":
+                    continue
+                # 提取局部区域特征
+                # 提取一个圆区域的mask
+                mask = np.zeros(img_rgb.shape[:2], dtype=np.uint8)
+                cv2.circle(mask, (wx, wy), est_radius, 1, thickness=-1)
+                # 提取局部灰度均值
+                local_pixels = img_rgb[mask > 0]
+                if len(local_pixels.shape) == 3 and local_pixels.shape[1] == 3:
+                    # 转灰度
+                    local_gray = np.mean(local_pixels, axis=1)
+                else:
+                    local_gray = local_pixels
+                local_mean = float(np.mean(local_gray)) if local_gray.size > 0 else 0.0
+                # dot_count: 统计区域内亮点数（可自定义，此处用亮度高于阈值的像素数/100）
+                dot_count = int(np.sum(local_gray > 180) // 100)
+                # 判断是否为non-growing
+                area_thresh = est_area * 0.3
+                intensity_thresh = 120
+                growth_status = "non-growing" if (est_area < area_thresh or local_mean < intensity_thresh) else "normal"
+                # 构造推测菌落条目
+                inferred_colony = {
+                    "id": f"colony_{well_id}",
+                    "well_id": well_id,
+                    "well_position": well_id,
+                    "center": (wx, wy),
+                    "radius": est_radius,
+                    "area": est_area,
+                    "intensity_mean": local_mean,
+                    "dot_count": dot_count,
+                    "colony_status": "inferred",
+                    "growth_status": growth_status,
+                    "forced_96plate": True,
+                    "is_null": True,
+                    "features": {
+                        "area": est_area,
+                        "intensity_mean": local_mean,
+                        "radius": est_radius,
+                        "dot_count": dot_count,
+                    },
+                    "scores": {},
+                    "phenotype": {},
+                }
+                forced_colonies.append(inferred_colony)
+                # --- 可视化: 灰色虚线圆, 标记“推测未生长” ---
+                circle_color = (160, 160, 160, 180)  # 灰色
+                thickness = 2
+                # 绘制虚线圆
+                dash_len = 6
+                for angle in range(0, 360, dash_len * 2):
+                    start_angle = angle
+                    end_angle = angle + dash_len
+                    draw.arc([wx - est_radius, wy - est_radius, wx + est_radius, wy + est_radius],
+                             start=start_angle, end=end_angle, fill=circle_color, width=thickness)
+                # 标注文字
+                label = "推测未生长"
+                text_color = (220, 0, 0) if growth_status == "non-growing" else (80, 80, 80)
+                text_xy = (wx + est_radius + 2, wy - 12)
+                if font:
+                    draw.text(text_xy, label, fill=text_color, font=font)
+                else:
+                    draw.text(text_xy, label, fill=text_color)
+        # 保存可视化到debug目录
+        debug_dir = self.result_manager.directories.get("debug", None)
+        if debug_dir:
+            vis_save_path = os.path.join(debug_dir, "force96_inferred.png")
+            try:
+                pil_img.save(vis_save_path)
+            except Exception:
+                pass
+        return forced_colonies
 
     def _initialize_components(self):
         """初始化所有组件"""
@@ -255,6 +421,8 @@ class AnalysisPipeline:
             visualizer = Visualizer(self.args.output)
             visualizer.create_debug_visualizations(img_rgb, analyzed_colonies)
 
+        # 额外: force_96plate_detection 推测未生长可视化已在 _force_96plate_detection 内保存
+
         logging.info(f"结果已保存到: {self.args.output}")
 
     def _generate_summary(self, analyzed_colonies):
@@ -286,6 +454,25 @@ def batch_medium_pipeline(input_folder: str, output_folder: str):
         key = (sample_name, medium, replicate)
         groups[key][orientation] = img_path
 
+    # 新增: 自动解析文件名并构造输出路径
+    from pathlib import Path
+    import re
+
+    def get_output_path(base_output_dir, image_path, replicate_id, view_type):
+        # 解析如：Lib96_Ctrl_@MMM_Back20250401_09191796
+        filename = Path(image_path).stem
+        match = re.match(r"(?P<group>Lib96_\w+)_@(?P<medium>\w+)_(?P<view>Back|Front)(?P<dateid>\d+)", filename)
+        if not match:
+            raise ValueError(f"Unexpected filename format: {filename}")
+
+        group = match.group("group")
+        medium = match.group("medium")
+        dateid = match.group("dateid")
+
+        out_dir = Path(base_output_dir) / group / medium / dateid / f"replicate_{replicate_id}" / view_type
+        out_dir.mkdir(parents=True, exist_ok=True)
+        return str(out_dir)
+
     summary_data: Dict[Tuple[str, str], List[Dict[str, float]]] = defaultdict(list)
 
     start_all = time.time()
@@ -294,46 +481,32 @@ def batch_medium_pipeline(input_folder: str, output_folder: str):
         group_items, desc="Batch processing", ncols=80
     ):
         step_start = time.time()
-        base_folder = (
-            Path(output_folder)
-            / sample_name
-            / medium.upper()
-            / f"replicate_{replicate}"
-        )
-        front_folder = base_folder / "Front"
-        back_folder = base_folder / "Back"
-        combined_folder = base_folder / "combined"
-        front_folder.mkdir(parents=True, exist_ok=True)
-        back_folder.mkdir(parents=True, exist_ok=True)
-        combined_folder.mkdir(parents=True, exist_ok=True)
 
         try:
+            # --- Use actual AnalysisPipeline for each orientation ---
             from argparse import Namespace
-
-            def run_one(image_path: Path, out_dir: Path, orientation: str):
-                img_args = Namespace(
-                    image=str(image_path),
-                    output=str(out_dir),
-                    mode="auto",
-                    model="vit_b",
-                    advanced=False,
-                    debug=False,
-                    config=None,
-                    min_area=2000,
-                    well_plate=False,
-                    rows=8,
-                    cols=12,
-                    verbose=False,
-                    medium=medium,
-                    orientation=orientation,
-                    replicate=replicate,
-                )
-                AnalysisPipeline(img_args).run()
-
-            if "front" in ori_dict:
-                run_one(ori_dict["front"], front_folder, "front")
-            if "back" in ori_dict:
-                run_one(ori_dict["back"], back_folder, "back")
+            from .pipeline import AnalysisPipeline
+            for orientation in ["front", "back"]:
+                if orientation in ori_dict:
+                    image_path = str(ori_dict[orientation])
+                    view_type = "Front" if orientation == "front" else "Back"
+                    output_path = get_output_path(output_folder, image_path, replicate, view_type)
+                    args = Namespace(
+                        image=image_path,
+                        input=None,
+                        input_dir=None,
+                        output=output_path,
+                        mode="hybrid",
+                        model="vit_h",
+                        debug=True,
+                        verbose=True,
+                        advanced=True,
+                        config=None,
+                        orientation=orientation,
+                        medium=medium,
+                    )
+                    pipeline = AnalysisPipeline(args)
+                    pipeline.run()
             if "front" not in ori_dict and "back" not in ori_dict:
                 logging.warning(
                     f"{sample_name} replicate {replicate} 缺少 Front/Back 图像，跳过"
@@ -349,8 +522,34 @@ def batch_medium_pipeline(input_folder: str, output_folder: str):
             )
             continue
 
-        front_stats = front_folder / "stats_Front.txt"
-        back_stats = back_folder / "stats_Back.txt"
+        # 解析 stats 路径
+        # 需要和 get_output_path 保持一致
+        # 构造 base_dir = output/Lib96_Ctrl/MMM/20250401_09191796/replicate_01
+        stats_base_dir = None
+        try:
+            # 任选 front/back 中一个 image_path
+            chosen_img = None
+            for orientation in ["front", "back"]:
+                if orientation in ori_dict:
+                    chosen_img = str(ori_dict[orientation])
+                    break
+            if not chosen_img:
+                continue
+            filename = Path(chosen_img).stem
+            match = re.match(r"(?P<group>Lib96_\w+)_@(?P<medium>\w+)_(?P<view>Back|Front)(?P<dateid>\d+)", filename)
+            if not match:
+                continue
+            group = match.group("group")
+            medium_str = match.group("medium")
+            dateid = match.group("dateid")
+            stats_base_dir = Path(output_folder) / group / medium_str / dateid / f"replicate_{replicate}"
+        except Exception:
+            continue
+
+        front_stats = stats_base_dir / "Front" / "stats_Front.txt"
+        back_stats = stats_base_dir / "Back" / "stats_Back.txt"
+        combined_folder = stats_base_dir / "combined"
+        combined_folder.mkdir(parents=True, exist_ok=True)
         if front_stats.exists() and back_stats.exists():
             metrics = combine_metrics(str(front_stats), str(back_stats))
             combined_path = combined_folder / "combined_stats.txt"
@@ -360,16 +559,17 @@ def batch_medium_pipeline(input_folder: str, output_folder: str):
 
             metrics_record = {"replicate": replicate}
             metrics_record.update(metrics)
-            summary_data[(sample_name, medium)].append(metrics_record)
+            summary_data[(group, medium_str)].append(metrics_record)
 
     import csv
     import statistics
 
-    for (sample_name, medium), records in summary_data.items():
+    for (group, medium), records in summary_data.items():
         if not records:
             continue
+        # dateid 不唯一，summary 聚合到 group/medium/summary
         summary_dir = (
-            Path(output_folder) / sample_name / medium.upper() / "summary"
+            Path(output_folder) / group / medium / "summary"
         )
         summary_dir.mkdir(parents=True, exist_ok=True)
 

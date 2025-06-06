@@ -1,5 +1,5 @@
 """Utilities for pairing front and back colony results."""
-
+import time
 from __future__ import annotations
 
 import json

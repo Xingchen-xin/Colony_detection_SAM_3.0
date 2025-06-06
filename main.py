@@ -12,12 +12,44 @@ import argparse
 import logging
 import sys
 import time
+import os
 from pathlib import Path
 from tqdm import tqdm
 
 from colony_analysis.pipeline import AnalysisPipeline, batch_medium_pipeline
 from colony_analysis.pairing import pair_colonies_across_views
 from colony_analysis.utils.file_utils import collect_all_images, parse_filename
+def get_output_path(image_name: str, replicate: str, orientation: str, output_root: str) -> str:
+    """
+    从图像文件名中提取组名、培养基、日期编号等信息，并构造输出路径。
+    示例输入: image_name='Lib96_Ctrl_@MMM_Front20250401_09202932'
+    replicate='01', orientation='Front'
+    返回:
+    'output/Lib96_Ctrl/MMM/20250401_09202932/replicate_01/Front/'
+    """
+    # 分割组名与其他信息
+    parts = image_name.split('_@')
+    if len(parts) != 2:
+        raise ValueError(f"图像名格式错误: {image_name}")
+    group_name = parts[0]                      # e.g., 'Lib96_Ctrl'
+    rest = parts[1]                            # e.g., 'MMM_Front20250401_09202932'
+    # 找到medium
+    medium = rest.split('Front')[0].split('Back')[0].rstrip('_')
+    # 找到full_id
+    full_id = ''
+    if 'Front' in rest:
+        full_id = rest.split('Front')[1]
+        orientation_str = 'Front'
+    elif 'Back' in rest:
+        full_id = rest.split('Back')[1]
+        orientation_str = 'Back'
+    else:
+        raise ValueError(f"图像名未包含Front或Back: {image_name}")
+    # 去除前导下划线
+    full_id = full_id.lstrip('_')
+    # 规范化orientation
+    orientation_str = orientation.capitalize()
+    return os.path.join(output_root, group_name, medium, full_id, f"replicate_{replicate}", orientation_str)
 
 
 def parse_arguments():
@@ -72,6 +104,11 @@ def parse_arguments():
     parser.add_argument("--well-plate", action="store_true", help="使用96孔板编号系统")
     parser.add_argument("--rows", type=int, default=8, help="孔板行数 (默认: 8)")
     parser.add_argument("--cols", type=int, default=12, help="孔板列数 (默认: 12)")
+    parser.add_argument("--force-96plate-detection", action="store_true", help="是否强制使用96孔板布局进行检测")
+    parser.add_argument("--fallback-null-policy", type=str, default="fill", choices=["fill", "null", "skip"], help="未检测到菌落时的处理策略")
+    parser.add_argument("--outlier-detection", action="store_true", help="是否启用离群值检测")
+    parser.add_argument("--outlier-metric", type=str, default="area", help="离群值检测使用的指标 (如 area/intensity/shape_metric)")
+    parser.add_argument("--outlier-threshold", type=float, default=3.0, help="离群值检测的Z-score阈值")
 
     # 配置参数
     parser.add_argument("--config", type=str, help="配置文件路径")
@@ -166,16 +203,15 @@ def main():
             except Exception:
                 pass
 
-            if sample_name and medium and orientation:
-                img_output = (
-                    img_output
-                    / sample_name
-                    / medium.upper()
-                    / orientation.capitalize()
-                    / f"replicate_{replicate}"
-                )
+            if sample_name and medium and orientation and replicate:
+                output_path = get_output_path(stem, replicate, orientation, args.output)
+                os.makedirs(output_path, exist_ok=True)
+                img_output = Path(output_path)
             elif len(images) > 1:
                 img_output = img_output / stem
+                os.makedirs(img_output, exist_ok=True)
+            else:
+                os.makedirs(img_output, exist_ok=True)
 
             img_args = argparse.Namespace(**vars(args))
             img_args.image = img
