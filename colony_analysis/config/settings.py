@@ -2,20 +2,22 @@
 # 4. colony_analysis/config/settings.py - 配置管理
 # ============================================================================
 
-import os
 import json
-import yaml
 import logging
+import os
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from dataclasses import dataclass, asdict
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
+
+import yaml
 
 
 @dataclass
 class DetectionConfig:
     """检测配置"""
-    model_type: str = 'vit_b'
-    mode: str = 'auto'
+
+    model_type: str = "vit_b"
+    mode: str = "auto"
     min_colony_area: int = 500
     max_colony_area: int = 30000
     expand_pixels: int = 2
@@ -55,6 +57,7 @@ class DetectionConfig:
 @dataclass
 class SAMConfig:
     """SAM模型配置"""
+
     points_per_side: int = 128
     pred_iou_thresh: float = 0.50
     stability_score_thresh: float = 0.50
@@ -66,6 +69,7 @@ class SAMConfig:
 @dataclass
 class AnalysisConfig:
     """分析配置"""
+
     advanced: bool = False
     learning_enabled: bool = False
     aerial_threshold: float = 0.6
@@ -77,19 +81,21 @@ class AnalysisConfig:
 @dataclass
 class OutputConfig:
     """输出配置"""
+
     debug: bool = False
     well_plate: bool = False
     rows: int = 8
     cols: int = 12
     save_masks: bool = True
     save_visualizations: bool = True
-    image_format: str = 'jpg'
+    image_format: str = "jpg"
 
 
 @dataclass
 class LoggingConfig:
     """日志配置"""
-    level: str = 'INFO'
+
+    level: str = "INFO"
     log_to_file: bool = True
     log_dir: Optional[str] = None
     max_log_files: int = 10
@@ -119,9 +125,9 @@ class ConfigManager:
 
         # 默认配置文件位置
         default_locations = [
-            'config.yaml',
-            Path.home() / '.colony_analysis' / 'config.yaml',
-            Path(__file__).parent.parent.parent / 'config.yaml'
+            "config.yaml",
+            Path.home() / ".colony_analysis" / "config.yaml",
+            Path(__file__).parent.parent.parent / "config.yaml",
         ]
 
         for path in default_locations:
@@ -129,7 +135,7 @@ class ConfigManager:
                 return str(path)
 
         # 返回默认路径（可能不存在）
-        return str(Path.home() / '.colony_analysis' / 'config.yaml')
+        return str(Path.home() / ".colony_analysis" / "config.yaml")
 
     def _load_config(self):
         """从文件加载配置"""
@@ -138,8 +144,8 @@ class ConfigManager:
             return
 
         try:
-            with open(self.config_path, 'r', encoding='utf-8') as f:
-                if self.config_path.endswith('.json'):
+            with open(self.config_path, "r", encoding="utf-8") as f:
+                if self.config_path.endswith(".json"):
                     config_data = json.load(f)
                 else:
                     config_data = yaml.safe_load(f) or {}
@@ -175,27 +181,27 @@ class ConfigManager:
     def update_from_args(self, args):
         """从命令行参数更新配置"""
         # 检测配置
-        if hasattr(args, 'model') and args.model:
+        if hasattr(args, "model") and args.model:
             self.detection.model_type = args.model
-        if hasattr(args, 'mode') and args.mode:
+        if hasattr(args, "mode") and args.mode:
             self.detection.mode = args.mode
-        if hasattr(args, 'min_area') and args.min_area:
+        if hasattr(args, "min_area") and args.min_area:
             self.detection.min_colony_area = args.min_area
 
         # 分析配置
-        if hasattr(args, 'advanced') and args.advanced:
+        if hasattr(args, "advanced") and args.advanced:
             self.analysis.advanced = True
 
         # 输出配置
-        if hasattr(args, 'debug') and args.debug:
+        if hasattr(args, "debug") and args.debug:
             self.output.debug = True
-        if hasattr(args, 'well_plate') and args.well_plate:
+        if hasattr(args, "well_plate") and args.well_plate:
             self.output.well_plate = True
-        if hasattr(args, 'rows') and args.rows:
+        if hasattr(args, "rows") and args.rows:
             self.output.rows = args.rows
-        if hasattr(args, 'cols') and args.cols:
+        if hasattr(args, "cols") and args.cols:
             self.output.cols = args.cols
 
         # 日志配置
-        if hasattr(args, 'verbose') and args.verbose:
-            self.logging.level = 'DEBUG'
+        if hasattr(args, "verbose") and args.verbose:
+            self.logging.level = "DEBUG"

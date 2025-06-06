@@ -2,16 +2,17 @@
 # 3. colony_analysis/pipeline.py - 分析管道
 # ============================================================================
 
-import time
 import logging
-import cv2
-from pathlib import Path
 import os
+import time
+from pathlib import Path
 
-from .config import ConfigManager
-from .core import SAMModel, ColonyDetector
+import cv2
+
 from .analysis import ColonyAnalyzer
-from .utils import ResultManager, Visualizer, ImageValidator
+from .config import ConfigManager
+from .core import ColonyDetector, SAMModel
+from .utils import ImageValidator, ResultManager, Visualizer
 
 
 class AnalysisPipeline:
@@ -49,12 +50,13 @@ class AnalysisPipeline:
             colonies = self._detect_colonies(img_rgb)
 
             # —— 如果是 hybrid 模式，检测器内部已经将每个 colony 对应到 well_position，
-            #    此处额外汇总哪些孔位漏检 —— 
-            if self.args.mode == 'hybrid':
+            #    此处额外汇总哪些孔位漏检 ——
+            if self.args.mode == "hybrid":
                 plate_wells = set(self.config.plate_grid.keys())
                 detected_wells = {
-                    c['well_position'] for c in colonies
-                    if c.get('well_position', '').upper() in plate_wells
+                    c["well_position"]
+                    for c in colonies
+                    if c.get("well_position", "").upper() in plate_wells
                 }
                 missing = plate_wells - detected_wells
                 if missing:
@@ -64,12 +66,12 @@ class AnalysisPipeline:
             if not colonies and self.args.debug:
                 self.detector.save_raw_debug(img_rgb)
                 return {
-                    'total_colonies': 0,
-                    'elapsed_time': time.time() - self.start_time,
-                    'output_dir': self.args.output,
-                    'mode': self.args.mode,
-                    'model': self.args.model,
-                    'advanced': self.args.advanced
+                    "total_colonies": 0,
+                    "elapsed_time": time.time() - self.start_time,
+                    "output_dir": self.args.output,
+                    "mode": self.args.mode,
+                    "model": self.args.model,
+                    "advanced": self.args.advanced,
                 }
 
             # 5. 执行分析
@@ -94,10 +96,7 @@ class AnalysisPipeline:
         self.config.update_from_args(self.args)
 
         # SAM模型
-        self.sam_model = SAMModel(
-            model_type=self.args.model,
-            config=self.config
-        )
+        self.sam_model = SAMModel(model_type=self.args.model, config=self.config)
 
         # 结果管理器
         self.result_manager = ResultManager(self.args.output)
@@ -107,14 +106,12 @@ class AnalysisPipeline:
             sam_model=self.sam_model,
             config=self.config,
             result_manager=self.result_manager,
-            debug=self.args.debug
+            debug=self.args.debug,
         )
 
         # 分析器
         self.analyzer = ColonyAnalyzer(
-            sam_model=self.sam_model,
-            config=self.config,
-            debug=self.args.debug
+            sam_model=self.sam_model, config=self.config, debug=self.args.debug
         )
 
         logging.info("组件初始化完成")
@@ -146,10 +143,7 @@ class AnalysisPipeline:
         """执行菌落检测"""
         logging.info("开始菌落检测...")
 
-        colonies = self.detector.detect(
-            img_rgb,
-            mode=self.args.mode
-        )
+        colonies = self.detector.detect(img_rgb, mode=self.args.mode)
 
         if not colonies:
             logging.warning("未检测到任何菌落，将继续生成调试信息")
@@ -160,10 +154,14 @@ class AnalysisPipeline:
         # ======== 自动重命名 unmapped 的 Debug 图为对应的孔位标签 ========
         debug_dir = Path(self.args.output) / "debug"
         for colony in colonies:
-            original_id = colony.get('id', '')
-            well_id = colony.get('well_position', '')
-            if original_id.startswith('colony_') and well_id and not well_id.startswith('unmapped'):
-                idx = original_id.split('_')[1]
+            original_id = colony.get("id", "")
+            well_id = colony.get("well_position", "")
+            if (
+                original_id.startswith("colony_")
+                and well_id
+                and not well_id.startswith("unmapped")
+            ):
+                idx = original_id.split("_")[1]
                 # 重命名自动检测阶段的调试图
                 old_name = f"debug_colony_unmapped_{idx}.png"
                 new_name = f"debug_colony_{well_id}_{idx}.png"
@@ -185,10 +183,10 @@ class AnalysisPipeline:
         metabolite_debug_dir = Path(self.args.output) / "debug_metabolite"
         if metabolite_debug_dir and metabolite_debug_dir.exists():
             for colony in colonies:
-                well_id = colony.get('well_position', '')
-                if well_id and not well_id.startswith('unmapped'):
+                well_id = colony.get("well_position", "")
+                if well_id and not well_id.startswith("unmapped"):
                     # 获取质心坐标
-                    centroid = colony.get('centroid', None)
+                    centroid = colony.get("centroid", None)
                     if centroid:
                         cy, cx = int(centroid[0]), int(centroid[1])
                         # 蓝色代谢图
@@ -213,10 +211,7 @@ class AnalysisPipeline:
         """执行菌落分析"""
         logging.info("开始菌落分析...")
 
-        analyzed_colonies = self.analyzer.analyze(
-            colonies,
-            advanced=self.args.advanced
-        )
+        analyzed_colonies = self.analyzer.analyze(colonies, advanced=self.args.advanced)
 
         logging.info(f"分析完成，共 {len(analyzed_colonies)} 个菌落")
         return analyzed_colonies
@@ -240,10 +235,10 @@ class AnalysisPipeline:
         elapsed_time = time.time() - self.start_time
 
         return {
-            'total_colonies': len(analyzed_colonies),
-            'elapsed_time': elapsed_time,
-            'output_dir': self.args.output,
-            'mode': self.args.mode,
-            'model': self.args.model,
-            'advanced': self.args.advanced
+            "total_colonies": len(analyzed_colonies),
+            "elapsed_time": elapsed_time,
+            "output_dir": self.args.output,
+            "mode": self.args.mode,
+            "model": self.args.model,
+            "advanced": self.args.advanced,
         }
