@@ -2,16 +2,17 @@
 # 5. colony_analysis/core/sam_model.py - SAM模型封装
 # ============================================================================
 
-import os
-import torch
-import numpy as np
-import cv2
 import logging
+import os
 from pathlib import Path
-from typing import Optional, List, Tuple
-from tqdm import tqdm
+from typing import List, Optional, Tuple
 
-from segment_anything import sam_model_registry, SamPredictor, SamAutomaticMaskGenerator
+import cv2
+import numpy as np
+import torch
+from segment_anything import (SamAutomaticMaskGenerator, SamPredictor,
+                              sam_model_registry)
+from tqdm import tqdm
 
 
 class SAMModel:
@@ -20,16 +21,18 @@ class SAMModel:
     def __init__(self, model_type="vit_b", checkpoint_path=None, config=None):
         """初始化SAM模型"""
         self.model_type = model_type
-        self.device = torch.device(
-            'cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.checkpoint_path = self._resolve_checkpoint_path(
-            checkpoint_path, model_type)
+            checkpoint_path, model_type
+        )
         self.params = self._extract_sam_params(config)
 
         self._load_model()
         logging.info(f"SAM模型已初始化 ({model_type})，设备: {self.device}")
 
-    def _resolve_checkpoint_path(self, checkpoint_path: Optional[str], model_type: str) -> str:
+    def _resolve_checkpoint_path(
+        self, checkpoint_path: Optional[str], model_type: str
+    ) -> str:
         """解析检查点路径"""
         if checkpoint_path and Path(checkpoint_path).exists():
             return checkpoint_path
@@ -38,14 +41,14 @@ class SAMModel:
         default_paths = {
             "vit_h": "models/sam_vit_h_4b8939.pth",
             "vit_l": "models/sam_vit_l_0b3195.pth",
-            "vit_b": "models/sam_vit_b_01ec64.pth"
+            "vit_b": "models/sam_vit_b_01ec64.pth",
         }
 
         path = default_paths.get(model_type)
         possible_paths = [
             path,
             f"src/{path}",
-            Path.home() / ".colony_analysis" / "models" / Path(path).name
+            Path.home() / ".colony_analysis" / "models" / Path(path).name,
         ]
 
         for p in possible_paths:
@@ -67,8 +70,8 @@ class SAMModel:
 
         if config is not None:
             try:
-                sam_config = config.get('sam')
-                if hasattr(sam_config, '__dict__'):
+                sam_config = config.get("sam")
+                if hasattr(sam_config, "__dict__"):
                     # 如果是dataclass对象
                     for key in default_params:
                         if hasattr(sam_config, key):
@@ -85,7 +88,8 @@ class SAMModel:
         try:
             # 加载SAM模型
             self.sam = sam_model_registry[self.model_type](
-                checkpoint=self.checkpoint_path)
+                checkpoint=self.checkpoint_path
+            )
             self.sam.to(device=self.device)
 
             # 初始化预测器
@@ -93,8 +97,7 @@ class SAMModel:
 
             # 初始化自动掩码生成器
             self.mask_generator = SamAutomaticMaskGenerator(
-                model=self.sam,
-                **self.params
+                model=self.sam, **self.params
             )
 
             logging.info(f"SAM模型加载成功，参数: {self.params}")
@@ -103,8 +106,9 @@ class SAMModel:
             logging.error(f"加载SAM模型失败: {e}")
             raise
 
-    def segment_everything(self, image: np.ndarray, min_area: int = 25,
-                           max_area: Optional[int] = None) -> Tuple[List[np.ndarray], List[float]]:
+    def segment_everything(
+        self, image: np.ndarray, min_area: int = 25, max_area: Optional[int] = None
+    ) -> Tuple[List[np.ndarray], List[float]]:
         """自动分割图像中的所有区域"""
         # 预处理图像
         image = self._preprocess_image(image)
@@ -117,9 +121,9 @@ class SAMModel:
         scores = []
 
         for mask_data in tqdm(masks_data, desc="SAM 分割候选", ncols=80):
-            mask = mask_data['segmentation']
-            score = mask_data['stability_score']
-            area = mask_data['area']
+            mask = mask_data["segmentation"]
+            score = mask_data["stability_score"]
+            area = mask_data["area"]
 
             # 面积过滤
             if area < min_area:
@@ -132,8 +136,9 @@ class SAMModel:
 
         return masks, scores
 
-    def segment_grid(self, image: np.ndarray, rows: int = 8, cols: int = 12,
-                     padding: float = 0.05) -> Tuple[List[np.ndarray], List[str]]:
+    def segment_grid(
+        self, image: np.ndarray, rows: int = 8, cols: int = 12, padding: float = 0.05
+    ) -> Tuple[List[np.ndarray], List[str]]:
         """使用网格策略分割规则布局"""
         image = self._preprocess_image(image)
         height, width = image.shape[:2]
@@ -148,8 +153,11 @@ class SAMModel:
         row_labels = [chr(65 + i) for i in range(rows)]
 
         # 遍历每个网格单元
-        for (r, c) in tqdm([(r, c) for r in range(rows) for c in range(cols)],
-                            desc="网格分割", ncols=80):
+        for r, c in tqdm(
+            [(r, c) for r in range(rows) for c in range(cols)],
+            desc="网格分割",
+            ncols=80,
+        ):
             # 计算单元格边界
             pad_y = int(cell_height * padding)
             pad_x = int(cell_width * padding)
@@ -174,9 +182,13 @@ class SAMModel:
 
         return masks, labels
 
-    def segment_with_prompts(self, image: np.ndarray, points: Optional[List[List[float]]] = None,
-                             point_labels: Optional[List[int]] = None,
-                             boxes: Optional[np.ndarray] = None) -> Tuple[np.ndarray, float]:
+    def segment_with_prompts(
+        self,
+        image: np.ndarray,
+        points: Optional[List[List[float]]] = None,
+        point_labels: Optional[List[int]] = None,
+        boxes: Optional[np.ndarray] = None,
+    ) -> Tuple[np.ndarray, float]:
         """使用提示进行分割"""
         image = self._preprocess_image(image)
         self.predictor.set_image(image)
@@ -190,23 +202,22 @@ class SAMModel:
             point_coords=point_coords,
             point_labels=point_labels_array,
             box=boxes,
-            multimask_output=True
+            multimask_output=True,
         )
 
         # 选择最佳掩码
         best_idx = np.argmax(scores)
         return masks[best_idx], scores[best_idx]
 
-    def find_diffusion_zone(self, image: np.ndarray, colony_mask: np.ndarray,
-                            expansion_pixels: int = 15) -> np.ndarray:
+    def find_diffusion_zone(
+        self, image: np.ndarray, colony_mask: np.ndarray, expansion_pixels: int = 15
+    ) -> np.ndarray:
         """寻找菌落的扩散区域"""
         kernel = np.ones((3, 3), np.uint8)
         iterations = max(1, expansion_pixels // 3)
 
         expanded_mask = cv2.dilate(
-            colony_mask.astype(np.uint8),
-            kernel,
-            iterations=iterations
+            colony_mask.astype(np.uint8), kernel, iterations=iterations
         )
 
         diffusion_mask = expanded_mask - colony_mask.astype(np.uint8)
@@ -226,4 +237,8 @@ class SAMModel:
     @property
     def is_ready(self) -> bool:
         """检查模型是否准备就绪"""
-        return hasattr(self, 'sam') and hasattr(self, 'predictor') and hasattr(self, 'mask_generator')
+        return (
+            hasattr(self, "sam")
+            and hasattr(self, "predictor")
+            and hasattr(self, "mask_generator")
+        )

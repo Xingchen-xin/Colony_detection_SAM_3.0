@@ -8,11 +8,11 @@ Colony Detection SAM 2.0 - 完整重构版本
 # 1. main.py - 主入口文件（简洁版）
 # ============================================================================
 
+import argparse
+import logging
 import os
 import sys
 import time
-import argparse
-import logging
 from pathlib import Path
 
 
@@ -26,51 +26,54 @@ def parse_arguments():
   python main.py -i image.jpg -o results/                    # 基本分析
   python main.py -i image.jpg -o results/ --advanced --debug # 高级分析
   python main.py -i plate.jpg --well-plate --mode grid       # 96孔板模式
-        """
+        """,
     )
 
     # 输入/输出
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--image', '-i', nargs='+',
-                       help='输入图像路径，可指定多个')
-    group.add_argument('--input-dir', '-I',
-                       help='包含待分析图像的目录')
-    parser.add_argument('--output', '-o', default='output',
-                        help='输出目录 (默认: output)')
-    parser.add_argument('--interactive', action='store_true',
-                        help='在批处理模式下与用户交互确认')
+    group.add_argument("--image", "-i", nargs="+", help="输入图像路径，可指定多个")
+    group.add_argument("--input-dir", "-I", help="包含待分析图像的目录")
+    parser.add_argument(
+        "--output", "-o", default="output", help="输出目录 (默认: output)"
+    )
+    parser.add_argument(
+        "--interactive", action="store_true", help="在批处理模式下与用户交互确认"
+    )
 
     # 检测参数
-    parser.add_argument('--mode', '-m',
-                        choices=['auto', 'grid', 'hybrid'],
-                        default='auto',
-                        help='检测模式 (默认: auto)')
-    parser.add_argument('--model',
-                        choices=['vit_b', 'vit_l', 'vit_h'],
-                        default='vit_b',
-                        help='SAM模型类型 (默认: vit_b)')
+    parser.add_argument(
+        "--mode",
+        "-m",
+        choices=["auto", "grid", "hybrid"],
+        default="auto",
+        help="检测模式 (默认: auto)",
+    )
+    parser.add_argument(
+        "--model",
+        choices=["vit_b", "vit_l", "vit_h"],
+        default="vit_b",
+        help="SAM模型类型 (默认: vit_b)",
+    )
 
     # 分析参数
-    parser.add_argument('--advanced', '-a', action='store_true',
-                        help='启用高级特征分析')
-    parser.add_argument('--debug', '-d', action='store_true',
-                        help='启用调试模式，生成详细输出')
-    parser.add_argument('--verbose', '-v', action='store_true',
-                        help='输出详细日志信息')
+    parser.add_argument(
+        "--advanced", "-a", action="store_true", help="启用高级特征分析"
+    )
+    parser.add_argument(
+        "--debug", "-d", action="store_true", help="启用调试模式，生成详细输出"
+    )
+    parser.add_argument("--verbose", "-v", action="store_true", help="输出详细日志信息")
 
     # 孔板参数
-    parser.add_argument('--well-plate', action='store_true',
-                        help='使用96孔板编号系统')
-    parser.add_argument('--rows', type=int, default=8,
-                        help='孔板行数 (默认: 8)')
-    parser.add_argument('--cols', type=int, default=12,
-                        help='孔板列数 (默认: 12)')
+    parser.add_argument("--well-plate", action="store_true", help="使用96孔板编号系统")
+    parser.add_argument("--rows", type=int, default=8, help="孔板行数 (默认: 8)")
+    parser.add_argument("--cols", type=int, default=12, help="孔板列数 (默认: 12)")
 
     # 配置参数
-    parser.add_argument('--config', type=str,
-                        help='配置文件路径')
-    parser.add_argument('--min-area', type=int, default=2000,
-                        help='最小菌落面积 (默认: 2000)')
+    parser.add_argument("--config", type=str, help="配置文件路径")
+    parser.add_argument(
+        "--min-area", type=int, default=2000, help="最小菌落面积 (默认: 2000)"
+    )
 
     return parser.parse_args()
 
@@ -78,22 +81,22 @@ def parse_arguments():
 def setup_logging(verbose=False):
     """配置日志系统"""
     level = logging.DEBUG if verbose else logging.INFO
-    format_str = '%(asctime)s - %(levelname)s - %(message)s'
+    format_str = "%(asctime)s - %(levelname)s - %(message)s"
 
     logging.basicConfig(
         level=level,
         format=format_str,
         handlers=[
             logging.StreamHandler(sys.stdout),
-        ]
+        ],
     )
 
     # 创建文件日志处理器
-    log_dir = Path('logs')
+    log_dir = Path("logs")
     log_dir.mkdir(exist_ok=True)
 
-    timestamp = time.strftime('%Y%m%d_%H%M%S')
-    log_file = log_dir / f'colony_analysis_{timestamp}.log'
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    log_file = log_dir / f"colony_analysis_{timestamp}.log"
 
     file_handler = logging.FileHandler(log_file)
     file_handler.setFormatter(logging.Formatter(format_str))
@@ -121,7 +124,7 @@ def main():
             input_path = Path(args.input_dir)
             if not input_path.is_dir():
                 raise NotADirectoryError(f"输入目录不存在: {args.input_dir}")
-            for ext in ['*.jpg', '*.jpeg', '*.png', '*.tif', '*.tiff']:
+            for ext in ["*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff"]:
                 images.extend(sorted(str(p) for p in input_path.glob(ext)))
             if not images:
                 raise FileNotFoundError("在指定目录中未找到图像文件")
@@ -131,7 +134,7 @@ def main():
         if args.interactive and len(images) > 1:
             print("即将处理以下图像:\n" + "\n".join(images))
             cont = input("继续? [y/N]: ").strip().lower()
-            if cont != 'y':
+            if cont != "y":
                 return 0
 
         for img in images:
@@ -152,8 +155,9 @@ def main():
         return 1
     except Exception as e:
         logging.error(f"程序执行失败: {e}")
-        if hasattr(args, 'debug') and args.debug:
+        if hasattr(args, "debug") and args.debug:
             import traceback
+
             logging.error(traceback.format_exc())
         return 1
 

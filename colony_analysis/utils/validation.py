@@ -2,16 +2,19 @@
 # 10. colony_analysis/utils/validation.py - 数据验证
 # ============================================================================
 
+from typing import Tuple
+
 import cv2
 import numpy as np
-from typing import Tuple
 
 
 class ImageValidator:
     """图像验证工具"""
 
     @staticmethod
-    def validate_image(img, min_size=(100, 100), max_size=(10000, 10000)) -> Tuple[bool, str]:
+    def validate_image(
+        img, min_size=(100, 100), max_size=(10000, 10000)
+    ) -> Tuple[bool, str]:
         """验证输入图像的有效性"""
         if img is None:
             return False, "无效的图像输入(None)"
@@ -54,24 +57,26 @@ class DataValidator:
     def validate_colony(colony, required_fields=None) -> Tuple[bool, str]:
         """验证菌落数据的有效性"""
         if required_fields is None:
-            required_fields = ['bbox', 'mask', 'img']
+            required_fields = ["bbox", "mask", "img"]
 
         for field in required_fields:
             if field not in colony:
                 return False, f"缺少必需字段: {field}"
 
         # 检查边界框格式
-        if 'bbox' in colony and (not isinstance(colony['bbox'], tuple) or len(colony['bbox']) != 4):
+        if "bbox" in colony and (
+            not isinstance(colony["bbox"], tuple) or len(colony["bbox"]) != 4
+        ):
             return False, f"无效的边界框格式: {colony['bbox']}"
 
         # 检查掩码和图像
-        if 'mask' in colony and 'img' in colony:
-            mask, img = colony['mask'], colony['img']
+        if "mask" in colony and "img" in colony:
+            mask, img = colony["mask"], colony["img"]
             if mask.shape[:2] != img.shape[:2]:
                 return False, f"掩码和图像尺寸不匹配: {mask.shape} vs {img.shape}"
 
         # 检查面积
-        if 'area' in colony and colony['area'] <= 0:
+        if "area" in colony and colony["area"] <= 0:
             return False, f"无效的面积值: {colony['area']}"
 
         return True, None

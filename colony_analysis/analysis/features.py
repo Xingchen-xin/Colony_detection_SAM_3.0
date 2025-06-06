@@ -2,16 +2,17 @@
 # 7. colony_analysis/analysis/features.py - 特征提取器
 # ============================================================================
 
+import os
+from typing import Any, Dict, Optional
+
 import cv2
 import numpy as np
-import os
-from typing import Dict, Any, Optional
 
 
 class FeatureExtractor:
     """菌落特征提取器"""
 
-    def __init__(self, extractor_type: str = 'basic', debug: bool = False):
+    def __init__(self, extractor_type: str = "basic", debug: bool = False):
         """初始化特征提取器"""
         self.extractor_type = extractor_type
         self.debug = debug
@@ -22,65 +23,67 @@ class FeatureExtractor:
 
     def extract(self, img: np.ndarray, mask: np.ndarray) -> Dict[str, Any]:
         """提取特征"""
-        if self.extractor_type == 'basic':
+        if self.extractor_type == "basic":
             return self._extract_basic_features(img, mask)
-        elif self.extractor_type == 'aerial':
+        elif self.extractor_type == "aerial":
             return self._extract_aerial_features(img, mask)
-        elif self.extractor_type == 'metabolite':
+        elif self.extractor_type == "metabolite":
             return self._extract_metabolite_features(img, mask)
         else:
             return {}
 
-    def _extract_basic_features(self, img: np.ndarray, mask: np.ndarray) -> Dict[str, Any]:
+    def _extract_basic_features(
+        self, img: np.ndarray, mask: np.ndarray
+    ) -> Dict[str, Any]:
         """提取基本形态特征"""
         binary_mask = mask > 0
         area = np.sum(binary_mask)
 
         contours, _ = cv2.findContours(
-            binary_mask.astype(np.uint8),
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_NONE
+            binary_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
         )
 
-        features = {'area': float(area)}
+        features = {"area": float(area)}
 
         if contours:
             contour = max(contours, key=cv2.contourArea)
 
             # 周长
             perimeter = cv2.arcLength(contour, True)
-            features['perimeter'] = float(perimeter)
+            features["perimeter"] = float(perimeter)
 
             # 圆形度
             if perimeter > 0:
-                circularity = (4 * np.pi * cv2.contourArea(contour)
-                               ) / (perimeter * perimeter)
-                features['circularity'] = float(circularity)
+                circularity = (4 * np.pi * cv2.contourArea(contour)) / (
+                    perimeter * perimeter
+                )
+                features["circularity"] = float(circularity)
 
             # 长宽比
             rect = cv2.minAreaRect(contour)
             width, height = rect[1]
             if width > 0 and height > 0:
                 aspect_ratio = max(width, height) / min(width, height)
-                features['aspect_ratio'] = float(aspect_ratio)
+                features["aspect_ratio"] = float(aspect_ratio)
 
             # 凸性
             hull = cv2.convexHull(contour)
             hull_area = cv2.contourArea(hull)
             if hull_area > 0:
                 convexity = cv2.contourArea(contour) / hull_area
-                features['convexity'] = float(convexity)
+                features["convexity"] = float(convexity)
 
         # 边缘密度
-        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if len(
-            img.shape) == 3 else img
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if len(img.shape) == 3 else img
         edges = cv2.Canny(gray, 50, 150)
         edge_density = np.sum(edges[binary_mask]) / area if area > 0 else 0
-        features['edge_density'] = float(edge_density)
+        features["edge_density"] = float(edge_density)
 
         return features
 
-    def _extract_aerial_features(self, img: np.ndarray, mask: np.ndarray) -> Dict[str, Any]:
+    def _extract_aerial_features(
+        self, img: np.ndarray, mask: np.ndarray
+    ) -> Dict[str, Any]:
         """提取气生菌丝特征"""
         binary_mask = mask > 0
 
@@ -90,8 +93,9 @@ class FeatureExtractor:
 
         # 识别气生菌丝
         aerial_mask = (v > 200) & (s < 50) & binary_mask
-        aerial_ratio = np.sum(
-            aerial_mask) / np.sum(binary_mask) if np.sum(binary_mask) > 0 else 0
+        aerial_ratio = (
+            np.sum(aerial_mask) / np.sum(binary_mask) if np.sum(binary_mask) > 0 else 0
+        )
 
         # 计算"高度"
         if np.sum(aerial_mask) > 0:
@@ -102,14 +106,16 @@ class FeatureExtractor:
             aerial_height_mean = aerial_height_std = aerial_height_max = 0
 
         return {
-            'morphology_aerial_area': float(np.sum(aerial_mask)),
-            'morphology_aerial_ratio': float(aerial_ratio),
-            'morphology_aerial_height_mean': float(aerial_height_mean),
-            'morphology_aerial_height_std': float(aerial_height_std),
-            'morphology_aerial_height_max': float(aerial_height_max)
+            "morphology_aerial_area": float(np.sum(aerial_mask)),
+            "morphology_aerial_ratio": float(aerial_ratio),
+            "morphology_aerial_height_mean": float(aerial_height_mean),
+            "morphology_aerial_height_std": float(aerial_height_std),
+            "morphology_aerial_height_max": float(aerial_height_max),
         }
 
-    def _extract_metabolite_features(self, img: np.ndarray, mask: np.ndarray) -> Dict[str, Any]:
+    def _extract_metabolite_features(
+        self, img: np.ndarray, mask: np.ndarray
+    ) -> Dict[str, Any]:
         """
         提取代谢产物特征：
         - 先对培养基进行CLAHE均衡化减弱背景黄褐色
@@ -120,12 +126,12 @@ class FeatureExtractor:
         binary_mask = mask > 0
         total_pixels = np.sum(binary_mask)
         features: Dict[str, Any] = {
-            'metabolite_blue_area': 0.0,
-            'metabolite_blue_ratio': 0.0,
-            'metabolite_blue_intensity_mean': 0.0,
-            'metabolite_red_area': 0.0,
-            'metabolite_red_ratio': 0.0,
-            'metabolite_red_intensity_mean': 0.0,
+            "metabolite_blue_area": 0.0,
+            "metabolite_blue_ratio": 0.0,
+            "metabolite_blue_intensity_mean": 0.0,
+            "metabolite_red_area": 0.0,
+            "metabolite_red_ratio": 0.0,
+            "metabolite_red_intensity_mean": 0.0,
         }
 
         if total_pixels == 0:
@@ -153,10 +159,11 @@ class FeatureExtractor:
         h_full, s_full, v_full_eq = cv2.split(hsv_eq_full)
 
         blue_threshold = (
-            (b_channel > r_channel + 20) &
-            (b_channel > g_channel + 20) &
-            (h_full >= 90) & (h_full <= 140) &
-            edge_mask_bool
+            (b_channel > r_channel + 20)
+            & (b_channel > g_channel + 20)
+            & (h_full >= 90)
+            & (h_full <= 140)
+            & edge_mask_bool
         )
 
         # 调试：将蓝色阈值区域生成可视化图，并保存
@@ -172,13 +179,15 @@ class FeatureExtractor:
             else:
                 cy_b, cx_b = 0, 0
             filename_blue = f"blue_{cy_b}_{cx_b}.png"
-            cv2.imwrite(os.path.join(self.debug_dir, filename_blue),
-                        cv2.cvtColor(vis_blue, cv2.COLOR_RGB2BGR))
+            cv2.imwrite(
+                os.path.join(self.debug_dir, filename_blue),
+                cv2.cvtColor(vis_blue, cv2.COLOR_RGB2BGR),
+            )
 
         blue_area = np.sum(blue_threshold)
-        features['metabolite_blue_area'] = float(blue_area)
-        features['metabolite_blue_ratio'] = float(blue_area / total_pixels)
-        features['metabolite_blue_intensity_mean'] = float(
+        features["metabolite_blue_area"] = float(blue_area)
+        features["metabolite_blue_ratio"] = float(blue_area / total_pixels)
+        features["metabolite_blue_intensity_mean"] = float(
             np.mean(b_channel[blue_threshold]) if blue_area > 0 else 0.0
         )
 
@@ -186,15 +195,12 @@ class FeatureExtractor:
         interior_mask_bool = binary_mask & (~edge_mask_bool)
 
         red_threshold = (
-            (r_channel > b_channel + 20) &
-            (r_channel > g_channel + 20) &
-            (
-                ((h_full >= 0) & (h_full <= 10)) |
-                ((h_full >= 170) & (h_full <= 179))
-            ) &
-            (s_full > 80) &
-            (v_full_eq > 80) &
-            interior_mask_bool
+            (r_channel > b_channel + 20)
+            & (r_channel > g_channel + 20)
+            & (((h_full >= 0) & (h_full <= 10)) | ((h_full >= 170) & (h_full <= 179)))
+            & (s_full > 80)
+            & (v_full_eq > 80)
+            & interior_mask_bool
         )
 
         # 调试：将红色阈值区域生成可视化图，并保存
@@ -208,13 +214,15 @@ class FeatureExtractor:
             else:
                 cy_r, cx_r = 0, 0
             filename_red = f"red_{cy_r}_{cx_r}.png"
-            cv2.imwrite(os.path.join(self.debug_dir, filename_red),
-                        cv2.cvtColor(vis_red, cv2.COLOR_RGB2BGR))
+            cv2.imwrite(
+                os.path.join(self.debug_dir, filename_red),
+                cv2.cvtColor(vis_red, cv2.COLOR_RGB2BGR),
+            )
 
         red_area = np.sum(red_threshold)
-        features['metabolite_red_area'] = float(red_area)
-        features['metabolite_red_ratio'] = float(red_area / total_pixels)
-        features['metabolite_red_intensity_mean'] = float(
+        features["metabolite_red_area"] = float(red_area)
+        features["metabolite_red_ratio"] = float(red_area / total_pixels)
+        features["metabolite_red_intensity_mean"] = float(
             np.mean(r_channel[red_threshold]) if red_area > 0 else 0.0
         )
 
