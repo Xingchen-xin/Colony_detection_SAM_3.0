@@ -11,6 +11,7 @@ from typing import Dict, List, Tuple
 from tqdm import tqdm
 
 import cv2
+import numpy as np
 
 from .analysis import ColonyAnalyzer
 from .config import ConfigManager
@@ -36,7 +37,83 @@ class AnalysisPipeline:
         self.detector = None
         self.analyzer = None
         self.result_manager = None
+    def _correct_plate_perspective(self, img_rgb):
+        """
+        Use chessboard corner detection to attempt perspective correction
+        and align the 96-well plate.
+        """
+        gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+        # internal corner grid size: 11x7 for a 12x8 well plate
+        ret, corners = cv2.findChessboardCorners(gray, (11, 7), None)
+        if ret:
+            logging.info("检测到棋盘角点，进行透视校正")
+            pts = corners.reshape(-1, 2)
+            sums = pts.sum(axis=1)
+            diffs = np.diff(pts, axis=1).ravel()
+            tl = pts[np.argmin(sums)]
+            br = pts[np.argmax(sums)]
+            tr = pts[np.argmin(diffs)]
+            bl = pts[np.argmax(diffs)]
+            width = int(np.hypot(tr[0] - tl[0], tr[1] - tl[1]))
+            height = int(np.hypot(bl[0] - tl[0], bl[1] - tl[1]))
+            src = np.array([tl, tr, br, bl], dtype="float32")
+            dst = np.array([[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]], dtype="float32")
+            M = cv2.getPerspectiveTransform(src, dst)
+            warped = cv2.warpPerspective(img_rgb, M, (width, height))
+            return warped
+        else:
+            logging.warning("透视校正：未检测到棋盘角点，保留原图")
+            return img_rgb
+    def _self_calibrate_grid(self, centroids: list[tuple]):
+        """
+        Infer a 12x8 well-plate grid by clustering colony centroids into rows and columns.
+        centroids: list of (x, y) tuples.
+        """
+        import numpy as np
+        import cv2
 
+        rows, cols = self.args.rows, self.args.cols
+        pts = np.array(centroids, dtype=np.float32)
+        if len(pts) < rows + cols:
+            logging.warning("质心数量不足，无法可靠自校准网格，使用静态网格")
+            return
+
+        # Cluster y-coordinates into row centers
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1.0)
+        _, labels_y, centers_y = cv2.kmeans(
+            pts[:, 1].reshape(-1, 1),
+            rows,
+            None,
+            criteria,
+            10,
+            cv2.KMEANS_RANDOM_CENTERS
+        )
+        row_centers = sorted(centers_y.ravel())
+
+        # Cluster x-coordinates into column centers
+        _, labels_x, centers_x = cv2.kmeans(
+            pts[:, 0].reshape(-1, 1),
+            cols,
+            None,
+            criteria,
+            10,
+            cv2.KMEANS_RANDOM_CENTERS
+        )
+        col_centers = sorted(centers_x.ravel())
+
+        # Estimate radius as a fraction of minimal inter-center distance
+        dy = np.min(np.diff(row_centers)) if rows > 1 else 0
+        dx = np.min(np.diff(col_centers)) if cols > 1 else 0
+        est_r = float(max((dx + dy) / 4, 1.0))
+
+        # Build plate_grid mapping well_id to (row, col, x, y, r)
+        plate_grid = {}
+        for i, y in enumerate(row_centers):
+            for j, x in enumerate(col_centers):
+                well_id = f"{chr(65 + i)}{j+1}"
+                plate_grid[well_id] = (i+1, j+1, float(x), float(y), est_r)
+
+        self.config.plate_grid = plate_grid
     def run(self):
         """运行完整的分析流程"""
         self.start_time = time.time()
@@ -46,14 +123,21 @@ class AnalysisPipeline:
 
             # 2. 加载和验证图像
             img_rgb = self._load_and_validate_image()
-
-            # -------- 新增 --------
-            # 创建 96-孔网格并存到 config，避免后面找不到
-            if not hasattr(self.config, "plate_grid"):
-                self.config.plate_grid = self.detector._create_plate_grid(
-                    img_rgb.shape[:2]
-                )
-            # -------- 新增结束 ------
+            # —— 全局透视校正，以对齐 96 孔板 —— 
+            img_rgb = self._correct_plate_perspective(img_rgb)
+            # —— 动态自校准 96孔网格（基于初次自动检测的质心分布） —— 
+            if getattr(self.args, "force_96plate_detection", False):
+                # 初次自动检测获取质心
+                auto_cols = self.detector.detect(img_rgb, mode="auto")
+                centroids = [c.get("centroid") for c in auto_cols if c.get("centroid") is not None]
+                if centroids:
+                    self._self_calibrate_grid(centroids)
+            else:
+                # 保持原有静态网格方案
+                if not hasattr(self.config, "plate_grid"):
+                    self.config.plate_grid = self.detector._create_plate_grid(
+                        img_rgb.shape[:2], self.args.rows, self.args.cols
+)
 
             # 3. 执行检测
             if getattr(self.args, "force_96plate_detection", False):
@@ -145,6 +229,15 @@ class AnalysisPipeline:
                     min_well = well_id
             if min_well is not None:
                 well_to_candidates[min_well].append(c)
+        # —— 筛选：每个孔位只保留得分最高的候选菌落 —— 
+        for well_id, candlist in well_to_candidates.items():
+            if candlist:
+                best = max(
+                    candlist,
+                    key=lambda c: c.get('scores', {}).get('overall_score', c.get('area', 0))
+                )
+                well_to_candidates[well_id] = [best]
+
         # 3. 统计所有已检测菌落的半径
         detected_colonies = []
         for candlist in well_to_candidates.values():

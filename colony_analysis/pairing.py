@@ -99,6 +99,16 @@ def save_merged_results(path: Path, data: List[Dict]):
         logging.info(f"成功保存配对结果到: {out_file}")
     except Exception as e:
         logging.error(f"保存配对结果失败: {out_file}: {e}")
+            # —— 新增：同时导出 Excel —— 
+    try:
+        import pandas as pd
+        df = pd.DataFrame(serializable_data)
+        excel_file = path / "merged.xlsx"
+        df.to_excel(excel_file, index=False)
+        logging.info(f"成功保存合并结果到 Excel: {excel_file}")
+    except Exception as e:
+        logging.error(f"导出 Excel 失败: {e}")
+
 
 
 def _euclidean_distance(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
@@ -181,7 +191,7 @@ def pair_colonies_across_views(output_dir: str, max_distance: float = 50.0):
             logging.warning(f"{replicate_dir.name} 缺少一侧图像结果")
 
         merged = match_and_merge_colonies(front_data, back_data, max_distance)
-        save_folder = replicate_dir / "Combined" / "results"
+        save_folder = replicate_dir / "combined" / "results"
         save_merged_results(save_folder, merged)
         logging.info(
             f"配对完成: {replicate_dir.name}, 共 {len(merged)} 条")
@@ -221,7 +231,7 @@ def pair_colonies_across_views(output_dir: str, max_distance: float = 50.0):
 
                     merged = match_and_merge_colonies(front_data, back_data, max_distance)
 
-                    save_folder = rep_dir / "Combined" / "results"
+                    save_folder = rep_dir / "combined" / "results"
                     save_merged_results(save_folder, merged)
                     elapsed = time.time() - step_start
                     logging.info(
@@ -255,7 +265,7 @@ def _process_single_replicate(replicate_dir: Path, max_distance: float):
     merged = match_and_merge_colonies(front_data, back_data, max_distance)
     
     # 保存结果
-    combined_dir = replicate_dir / "Combined" / "results"
+    combined_dir = replicate_dir / "combined" / "results"
     combined_dir.mkdir(parents=True, exist_ok=True)
     
     output_file = combined_dir / "merged.json"
