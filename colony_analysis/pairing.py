@@ -9,65 +9,8 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 from tqdm import tqdm
+import numpy as np
 
-
-def load_colony_data(folder: Path) -> List[Dict]:
-    """改进的数据加载函数，支持多种数据格式"""
-    colonies: List[Dict] = []
-    
-    if not folder.exists() or not folder.is_dir():
-        logging.warning(f"目录不存在或不是目录: {folder}")
-        return colonies
-    
-    # 首先尝试加载 detailed_results.json
-    detailed = folder / "results" / "detailed_results.json"
-    if detailed.exists():
-        try:
-            with open(detailed, "r", encoding="utf-8") as f:
-                colonies = json.load(f)
-            logging.debug(f"从 {detailed} 加载了 {len(colonies)} 个菌落")
-            return colonies
-        except Exception as e:
-            logging.error(f"读取 {detailed} 失败: {e}")
-    
-    # 尝试加载 analysis_results.csv（主要的结果文件）
-    csv_file = folder / "results" / "analysis_results.csv"
-    if csv_file.exists():
-        try:
-            import pandas as pd
-            df = pd.read_csv(csv_file)
-            # 转换为字典列表，只保留需要的字段
-            for _, row in df.iterrows():
-                colony = {
-                    'id': row.get('id', ''),
-                    'well_position': row.get('well_position', ''),
-                    'area': float(row.get('area', 0)),
-                    'centroid': eval(row.get('centroid', '(0, 0)')) if pd.notna(row.get('centroid')) else (0, 0),
-                    'sam_score': float(row.get('sam_score', 0)),
-                    'quality_score': float(row.get('quality_score', 0))
-                }
-                colonies.append(colony)
-            logging.debug(f"从 {csv_file} 加载了 {len(colonies)} 个菌落")
-            return colonies
-        except Exception as e:
-            logging.error(f"读取 {csv_file} 失败: {e}")
-    
-    # 最后尝试加载单个 colony_*.json 文件
-    json_files = list(folder.glob("colony_*.json"))
-    if json_files:
-        for json_file in sorted(json_files):
-            try:
-                with open(json_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    colonies.append(data)
-            except Exception as e:
-                logging.error(f"读取 {json_file} 失败: {e}")
-        logging.debug(f"从单个 JSON 文件加载了 {len(colonies)} 个菌落")
-    
-    return colonies
-
-
-# 修复1：改进 load_colony_data 函数，确保能正确加载数据
 
 def load_colony_data(folder: Path) -> List[Dict]:
     """改进的数据加载函数，支持多种数据格式"""
@@ -222,8 +165,10 @@ def pair_colonies_across_views(output_dir: str, max_distance: float = 50.0):
         replicate_dir = None
 
     if replicate_dir:
-        front_data = load_colony_data(replicate_dir / "Front")
-        back_data = load_colony_data(replicate_dir / "Back")
+        front_dir = replicate_dir / "Front"
+        back_dir = replicate_dir / "Back"
+        front_data = load_colony_data(front_dir)
+        back_data = load_colony_data(back_dir)
         # 添加调试日志
         logging.debug(f"Front目录 {front_dir}: 加载了 {len(front_data)} 个菌落")
         logging.debug(f"Back目录 {back_dir}: 加载了 {len(back_data)} 个菌落")
