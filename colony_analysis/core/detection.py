@@ -1361,7 +1361,28 @@ class ColonyDetector:
                 valid_colonies
             )
 
-        return valid_colonies
+        # ------- Ensure at most one colony per well position -------
+        well_best: Dict[str, Tuple[float, Dict]] = {}
+        unmapped: List[Dict] = []
+        for colony in valid_colonies:
+            well_id = colony.get("well_position", "")
+            score = colony.get("quality_score", colony.get("sam_score", 0.0))
+            if not well_id or well_id.startswith("unmapped"):
+                unmapped.append(colony)
+                continue
+            if (
+                well_id not in well_best
+                or score > well_best[well_id][0]
+            ):
+                well_best[well_id] = (score, colony)
+
+        deduped_colonies = [c for _, c in well_best.values()] + unmapped
+        if len(deduped_colonies) < len(valid_colonies):
+            logging.info(
+                f"按孔位唯一化: {len(valid_colonies)} -> {len(deduped_colonies)}"
+            )
+
+        return deduped_colonies
 
     def _filter_overlapping_colonies(self, colonies: List[Dict]) -> List[Dict]:
         """改进的重叠过滤 - 修复版本"""
