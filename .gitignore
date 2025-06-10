@@ -84,7 +84,6 @@ data/
 *.csv
 *.xlsx
 *.json
-!config.yaml
 !requirements.txt
 
 # 图像文件（示例图像除外）
@@ -95,6 +94,8 @@ data/
 *.tiff
 *.bmp
 !examples/images/.gitkeep
+!Image_input/
+!Image_input/**
 
 # 测试覆盖率报告
 htmlcov/
