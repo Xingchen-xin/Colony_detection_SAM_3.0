@@ -106,12 +106,25 @@ class AnalysisPipeline:
         dx = np.min(np.diff(col_centers)) if cols > 1 else 0
         est_r = float(max((dx + dy) / 4, 1.0))
 
-        # Build plate_grid mapping well_id to (row, col, x, y, r)
+        # Build plate_grid mapping in dictionary format
         plate_grid = {}
+        cell_h = np.min(np.diff(row_centers)) if rows > 1 else dy
+        cell_w = np.min(np.diff(col_centers)) if cols > 1 else dx
         for i, y in enumerate(row_centers):
             for j, x in enumerate(col_centers):
                 well_id = f"{chr(65 + i)}{j+1}"
-                plate_grid[well_id] = (i+1, j+1, float(x), float(y), est_r)
+                plate_grid[well_id] = {
+                    "center": (float(y), float(x)),
+                    "search_radius": est_r,
+                    "row": i,
+                    "col": j,
+                    "expected_bbox": (
+                        int(y - cell_h / 2),
+                        int(x - cell_w / 2),
+                        int(y + cell_h / 2),
+                        int(x + cell_w / 2),
+                    ),
+                }
 
         self.config.plate_grid = plate_grid
     def run(self):
@@ -191,8 +204,13 @@ class AnalysisPipeline:
             # 7. 保存结果
             self._save_results(analyzed_colonies, img_rgb)
 
-            # 8. 返回结果摘要
-            return self._generate_summary(analyzed_colonies)
+            # 8. 返回结果摘要并记录日志
+            summary = self._generate_summary(analyzed_colonies)
+            logging.info(
+                f"分析完成: {summary['total_colonies']} 个菌落,"
+                f" 耗时 {summary['elapsed_time']:.2f}s"
+            )
+            return summary
 
         except Exception as e:
             logging.error(f"分析管道执行失败: {e}")
@@ -208,7 +226,7 @@ class AnalysisPipeline:
         import cv2
         from PIL import Image, ImageDraw, ImageFont
 
-        # 获取plate_grid: well_id -> (row, col, cx, cy, r)
+        # 获取plate_grid: {well_id: {center, search_radius, ...}}
         plate_grid = self.config.plate_grid
         # 1. 检测所有菌落
         colonies = self.detector.detect(img_rgb, mode="grid")
@@ -222,7 +240,9 @@ class AnalysisPipeline:
             # 找到最近的well
             min_dist = float("inf")
             min_well = None
-            for well_id, (row, col, wx, wy, wr) in plate_grid.items():
+            for well_id, info in plate_grid.items():
+                wy, wx = info["center"]
+                wr = info.get("search_radius", 20)
                 d = np.hypot(cx - wx, cy - wy)
                 if d < min_dist and d < wr * 1.5:  # 允许一定范围
                     min_dist = d
@@ -267,8 +287,8 @@ class AnalysisPipeline:
             font = None
         for well_id in sorted(plate_grid.keys()):
             candidates = well_to_candidates[well_id]
-            # 获取理论孔位中心与半径
-            row, col, wx, wy, wr = plate_grid[well_id]
+            info = plate_grid[well_id]
+            wy, wx = info["center"]
             wx, wy = int(wx), int(wy)
             est_radius = int(median_radius)
             est_area = float(np.pi * (est_radius ** 2))

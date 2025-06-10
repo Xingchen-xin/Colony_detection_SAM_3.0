@@ -528,10 +528,46 @@ class ColonyDetector:
     def _create_plate_grid(
         self, img_shape: Tuple[int, int], rows: int = 8, cols: int = 12
     ) -> Dict[str, Dict]:
-        """创建孔板网格映射"""
+        """创建孔板网格映射
+
+        如果 ``self.config`` 中提供 ``plate_grid`` 信息，则优先使用该网格。
+        支持两种格式：
+
+        1. ``{well_id: (row, col, x, y, r)}``
+        2. ``{well_id: {center, search_radius, row, col, expected_bbox}}``
+        """
+
+        # 优先使用外部给定的网格
+        if hasattr(self.config, "plate_grid") and self.config.plate_grid:
+            grid = self.config.plate_grid
+            first_val = next(iter(grid.values()))
+            if isinstance(first_val, dict):
+                return grid
+            else:
+                # 将 (row, col, x, y, r) 转换为字典格式
+                height, width = img_shape
+                cell_h = height / rows
+                cell_w = width / cols
+                converted = {}
+                for wid, (r_idx, c_idx, cx, cy, rad) in grid.items():
+                    center_y, center_x = float(cy), float(cx)
+                    converted[wid] = {
+                        "center": (center_y, center_x),
+                        "search_radius": rad,
+                        "row": int(r_idx) - 1,
+                        "col": int(c_idx) - 1,
+                        "expected_bbox": (
+                            int(center_y - cell_h / 2),
+                            int(center_x - cell_w / 2),
+                            int(center_y + cell_h / 2),
+                            int(center_x + cell_w / 2),
+                        ),
+                    }
+                return converted
+
+        # 未提供网格时按图像大小生成静态均匀网格
         height, width = img_shape
 
-        # 计算网格参数，考虑边距
         margin_y = height * 0.03  # 3%边距
         margin_x = width * 0.03
 
@@ -548,11 +584,9 @@ class ColonyDetector:
             for c in range(cols):
                 well_id = f"{row_labels[r]}{c+1}"
 
-                # 计算孔位中心和搜索区域
                 center_y = margin_y + (r + 0.5) * cell_height
                 center_x = margin_x + (c + 0.5) * cell_width
 
-                # 扩大搜索半径，允许一定偏移
                 search_radius = min(cell_height, cell_width) * 0.75
 
                 plate_grid[well_id] = {
