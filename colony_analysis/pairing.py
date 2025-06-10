@@ -164,6 +164,8 @@ def match_and_merge_colonies(
 def pair_colonies_across_views(output_dir: str, max_distance: float = 50.0):
     """Pair colonies from front and back results under ``output_dir``."""
 
+    logging.info(f"开始配对结果目录: {output_dir}")
+
     root = Path(output_dir).resolve()
 
     # If a replicate or orientation directory is provided, handle it directly
@@ -246,16 +248,16 @@ def _process_single_replicate(replicate_dir: Path, max_distance: float):
     back_dir = replicate_dir / "Back"
     
     # 调试信息
-    logging.info(f"处理 replicate: {replicate_dir}")
-    logging.info(f"  Front 目录: {front_dir} (存在: {front_dir.exists()})")
-    logging.info(f"  Back 目录: {back_dir} (存在: {back_dir.exists()})")
+    logging.debug(f"处理 replicate: {replicate_dir}")
+    logging.debug(f"  Front 目录: {front_dir} (存在: {front_dir.exists()})")
+    logging.debug(f"  Back 目录: {back_dir} (存在: {back_dir.exists()})")
     
     # 加载数据
     front_data = load_colony_data(front_dir)
     back_data = load_colony_data(back_dir)
     
-    logging.info(f"  加载 Front 数据: {len(front_data)} 个菌落")
-    logging.info(f"  加载 Back 数据: {len(back_data)} 个菌落")
+    logging.debug(f"  加载 Front 数据: {len(front_data)} 个菌落")
+    logging.debug(f"  加载 Back 数据: {len(back_data)} 个菌落")
     
     if not front_data and not back_data:
         logging.warning(f"{replicate_dir} 缺少前后视角数据，跳过配对")
@@ -264,14 +266,9 @@ def _process_single_replicate(replicate_dir: Path, max_distance: float):
     # 执行配对
     merged = match_and_merge_colonies(front_data, back_data, max_distance)
     
-    # 保存结果
+    # 保存结果（统一保存 JSON 与 Excel）
     combined_dir = replicate_dir / "combined" / "results"
-    combined_dir.mkdir(parents=True, exist_ok=True)
-    
-    output_file = combined_dir / "merged.json"
-    try:
-        with open(output_file, "w", encoding="utf-8") as f:
-            json.dump(merged, f, indent=2, ensure_ascii=False)
-        logging.info(f"  保存配对结果: {output_file} ({len(merged)} 条)")
-    except Exception as e:
-        logging.error(f"  保存配对结果失败: {e}")
+    save_merged_results(combined_dir, merged)
+    logging.info(
+        f"replicate {replicate_dir.name} 配对完成，共 {len(merged)} 条"
+    )
