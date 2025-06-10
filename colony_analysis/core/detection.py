@@ -285,7 +285,7 @@ class ColonyDetector:
             logging.info("已根据检测结果调整网格位置")
 
         # Step 3: 将检测到的菌落映射到最近的孔位
-        mapped_colonies = self._map_colonies_to_wells(auto_colonies, plate_grid)
+        mapped_colonies = self._map_colonies_to_wells_with_dedup(auto_colonies, plate_grid)
 
         # ======== 自动重命名 Debug 图为对应的孔位标签 ========
         debug_dir = self.result_manager.directories["debug"]
@@ -816,6 +816,123 @@ class ColonyDetector:
             return adjusted_grid
 
         return initial_grid
+
+
+    def _map_colonies_to_wells_with_dedup(
+        self, colonies: List[Dict], plate_grid: Dict[str, Dict]
+    ) -> List[Dict]:
+        """将菌落映射到孔位，每个孔位只保留最高分的菌落"""
+        
+        # 第一步：使用现有方法进行初步映射
+        mapped_colonies = self._map_colonies_to_wells(colonies, plate_grid)
+        
+        # 第二步：对每个孔位进行去重
+        well_to_colonies = {}
+        unmapped_colonies = []
+        
+        for colony in mapped_colonies:
+            well_id = colony.get("well_position", "")
+            
+            if not well_id or well_id.startswith("unmapped"):
+                unmapped_colonies.append(colony)
+                continue
+            
+            if well_id not in well_to_colonies:
+                well_to_colonies[well_id] = []
+            well_to_colonies[well_id].append(colony)
+        
+        # 每个孔位选择最佳菌落
+        deduped_colonies = []
+        
+        for well_id, candidates in well_to_colonies.items():
+            if len(candidates) == 1:
+                deduped_colonies.append(candidates[0])
+            else:
+                # 综合评分：质量分数 + SAM分数 + 面积（归一化）
+                def get_composite_score(colony):
+                    quality = colony.get("quality_score", 0) * 0.4
+                    sam = colony.get("sam_score", 0) * 0.4
+                    # 面积归一化到0-1，假设最大面积为20000
+                    area_norm = min(colony.get("area", 0) / 20000, 1.0) * 0.2
+                    return quality + sam + area_norm
+                
+                best_colony = max(candidates, key=get_composite_score)
+                
+                # 记录选择信息
+                logging.debug(
+                    f"孔位 {well_id}: 从 {len(candidates)} 个候选中选择 "
+                    f"ID={best_colony.get('id')} "
+                    f"(综合分数={get_composite_score(best_colony):.3f})"
+                )
+                
+                # 如果有边缘伪影，优先过滤掉
+                non_artifact_candidates = []
+                for c in candidates:
+                    # 检查是否为边缘伪影（简单判断）
+                    bbox = c.get("bbox", (0, 0, 0, 0))
+                    if self._is_likely_edge_artifact(bbox, self._last_img.shape[:2]):
+                        logging.debug(f"过滤掉边缘伪影: {c.get('id')}")
+                    else:
+                        non_artifact_candidates.append(c)
+                
+                # 如果过滤后还有候选，使用过滤后的结果
+                if non_artifact_candidates:
+                    best_colony = max(non_artifact_candidates, key=get_composite_score)
+                
+                deduped_colonies.append(best_colony)
+        
+        # 添加所有未映射的菌落
+        deduped_colonies.extend(unmapped_colonies)
+        
+        logging.info(
+            f"孔位去重完成: {len(mapped_colonies)} -> {len(deduped_colonies)} 个菌落 "
+            f"(移除 {len(mapped_colonies) - len(deduped_colonies)} 个重复)"
+        )
+        
+        return deduped_colonies
+
+    def _is_likely_edge_artifact(self, bbox: Tuple, img_shape: Tuple[int, int]) -> bool:
+        """快速判断是否可能是边缘伪影（用于去重时的辅助判断）"""
+        minr, minc, maxr, maxc = bbox
+        h, w = img_shape
+        edge_margin = 30
+        
+        # 检查是否紧贴边缘
+        touches_edges = 0
+        if minr < edge_margin:
+            touches_edges += 1
+        if maxr > h - edge_margin:
+            touches_edges += 1
+        if minc < edge_margin:
+            touches_edges += 1
+        if maxc > w - edge_margin:
+            touches_edges += 1
+        
+        # 如果接触2个或以上边缘（角落），很可能是伪影
+        if touches_edges >= 2:
+            # 计算宽高比
+            width = maxc - minc
+            height = maxr - minr
+            aspect_ratio = max(width, height) / (min(width, height) + 1e-6)
+            
+            # 如果形状很不规则（太细长），也可能是伪影
+            if aspect_ratio > 3:
+                return True
+            
+            # 检查是否主要在角落
+            corner_size = min(h, w) // 10
+            in_corner = (
+                (minr < corner_size and minc < corner_size) or  # 左上
+                (minr < corner_size and maxc > w - corner_size) or  # 右上
+                (maxr > h - corner_size and minc < corner_size) or  # 左下
+                (maxr > h - corner_size and maxc > w - corner_size)  # 右下
+            )
+            
+            if in_corner:
+                return True
+        
+        return False
+
 
     def _is_reasonable_colony_shape(self, mask: np.ndarray) -> bool:
         """检查菌落形状是否合理"""

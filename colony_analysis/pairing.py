@@ -12,38 +12,148 @@ from tqdm import tqdm
 
 
 def load_colony_data(folder: Path) -> List[Dict]:
-    """Load colony data from a result folder."""
+    """改进的数据加载函数，支持多种数据格式"""
     colonies: List[Dict] = []
+    
     if not folder.exists() or not folder.is_dir():
+        logging.warning(f"目录不存在或不是目录: {folder}")
         return colonies
-
+    
+    # 首先尝试加载 detailed_results.json
     detailed = folder / "results" / "detailed_results.json"
     if detailed.exists():
         try:
             with open(detailed, "r", encoding="utf-8") as f:
                 colonies = json.load(f)
+            logging.debug(f"从 {detailed} 加载了 {len(colonies)} 个菌落")
+            return colonies
         except Exception as e:
-            logging.error(f"读取菌落数据失败: {detailed}: {e}")
-        return colonies
-
-    # Fallback to individual colony_*.json files
-    for json_file in sorted(folder.glob("colony_*.json")):
+            logging.error(f"读取 {detailed} 失败: {e}")
+    
+    # 尝试加载 analysis_results.csv（主要的结果文件）
+    csv_file = folder / "results" / "analysis_results.csv"
+    if csv_file.exists():
         try:
-            with open(json_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                colonies.append(data)
+            import pandas as pd
+            df = pd.read_csv(csv_file)
+            # 转换为字典列表，只保留需要的字段
+            for _, row in df.iterrows():
+                colony = {
+                    'id': row.get('id', ''),
+                    'well_position': row.get('well_position', ''),
+                    'area': float(row.get('area', 0)),
+                    'centroid': eval(row.get('centroid', '(0, 0)')) if pd.notna(row.get('centroid')) else (0, 0),
+                    'sam_score': float(row.get('sam_score', 0)),
+                    'quality_score': float(row.get('quality_score', 0))
+                }
+                colonies.append(colony)
+            logging.debug(f"从 {csv_file} 加载了 {len(colonies)} 个菌落")
+            return colonies
         except Exception as e:
-            logging.error(f"读取菌落数据失败: {json_file}: {e}")
+            logging.error(f"读取 {csv_file} 失败: {e}")
+    
+    # 最后尝试加载单个 colony_*.json 文件
+    json_files = list(folder.glob("colony_*.json"))
+    if json_files:
+        for json_file in sorted(json_files):
+            try:
+                with open(json_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    colonies.append(data)
+            except Exception as e:
+                logging.error(f"读取 {json_file} 失败: {e}")
+        logging.debug(f"从单个 JSON 文件加载了 {len(colonies)} 个菌落")
+    
     return colonies
 
 
+# 修复1：改进 load_colony_data 函数，确保能正确加载数据
+
+def load_colony_data(folder: Path) -> List[Dict]:
+    """改进的数据加载函数，支持多种数据格式"""
+    colonies: List[Dict] = []
+    
+    if not folder.exists() or not folder.is_dir():
+        logging.warning(f"目录不存在或不是目录: {folder}")
+        return colonies
+    
+    # 首先尝试加载 detailed_results.json
+    detailed = folder / "results" / "detailed_results.json"
+    if detailed.exists():
+        try:
+            with open(detailed, "r", encoding="utf-8") as f:
+                colonies = json.load(f)
+            logging.debug(f"从 {detailed} 加载了 {len(colonies)} 个菌落")
+            return colonies
+        except Exception as e:
+            logging.error(f"读取 {detailed} 失败: {e}")
+    
+    # 尝试加载 analysis_results.csv（主要的结果文件）
+    csv_file = folder / "results" / "analysis_results.csv"
+    if csv_file.exists():
+        try:
+            import pandas as pd
+            df = pd.read_csv(csv_file)
+            # 转换为字典列表，只保留需要的字段
+            for _, row in df.iterrows():
+                colony = {
+                    'id': row.get('id', ''),
+                    'well_position': row.get('well_position', ''),
+                    'area': float(row.get('area', 0)),
+                    'centroid': eval(row.get('centroid', '(0, 0)')) if pd.notna(row.get('centroid')) else (0, 0),
+                    'sam_score': float(row.get('sam_score', 0)),
+                    'quality_score': float(row.get('quality_score', 0))
+                }
+                colonies.append(colony)
+            logging.debug(f"从 {csv_file} 加载了 {len(colonies)} 个菌落")
+            return colonies
+        except Exception as e:
+            logging.error(f"读取 {csv_file} 失败: {e}")
+    
+    # 最后尝试加载单个 colony_*.json 文件
+    json_files = list(folder.glob("colony_*.json"))
+    if json_files:
+        for json_file in sorted(json_files):
+            try:
+                with open(json_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    colonies.append(data)
+            except Exception as e:
+                logging.error(f"读取 {json_file} 失败: {e}")
+        logging.debug(f"从单个 JSON 文件加载了 {len(colonies)} 个菌落")
+    
+    return colonies
+
+
+# 修复2：改进 save_merged_results，确保文件正确保存
+
 def save_merged_results(path: Path, data: List[Dict]):
-    """Save merged pairing results to path/merged.json."""
+    """保存合并的配对结果"""
     path.mkdir(parents=True, exist_ok=True)
     out_file = path / "merged.json"
+    
+    # 确保数据可序列化
+    serializable_data = []
+    for item in data:
+        try:
+            # 处理 numpy 类型
+            item_copy = {}
+            for k, v in item.items():
+                if isinstance(v, np.ndarray):
+                    item_copy[k] = v.tolist()
+                elif isinstance(v, (np.integer, np.floating)):
+                    item_copy[k] = float(v)
+                else:
+                    item_copy[k] = v
+            serializable_data.append(item_copy)
+        except Exception as e:
+            logging.error(f"序列化数据项失败: {e}")
+            serializable_data.append(item)
+    
     try:
         with open(out_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+            json.dump(serializable_data, f, indent=2, ensure_ascii=False)
+        logging.info(f"成功保存配对结果到: {out_file}")
     except Exception as e:
         logging.error(f"保存配对结果失败: {out_file}: {e}")
 
@@ -114,6 +224,9 @@ def pair_colonies_across_views(output_dir: str, max_distance: float = 50.0):
     if replicate_dir:
         front_data = load_colony_data(replicate_dir / "Front")
         back_data = load_colony_data(replicate_dir / "Back")
+        # 添加调试日志
+        logging.debug(f"Front目录 {front_dir}: 加载了 {len(front_data)} 个菌落")
+        logging.debug(f"Back目录 {back_dir}: 加载了 {len(back_data)} 个菌落")
 
         if not front_data and not back_data:
             logging.warning(f"{replicate_dir} 缺少前后视角数据，跳过配对")
@@ -172,3 +285,38 @@ def pair_colonies_across_views(output_dir: str, max_distance: float = 50.0):
     total_elapsed = time.time() - start_all
     logging.info(f"配对处理完成，总耗时 {total_elapsed:.2f}s")
 
+def _process_single_replicate(replicate_dir: Path, max_distance: float):
+    """处理单个 replicate 的配对"""
+    front_dir = replicate_dir / "Front"
+    back_dir = replicate_dir / "Back"
+    
+    # 调试信息
+    logging.info(f"处理 replicate: {replicate_dir}")
+    logging.info(f"  Front 目录: {front_dir} (存在: {front_dir.exists()})")
+    logging.info(f"  Back 目录: {back_dir} (存在: {back_dir.exists()})")
+    
+    # 加载数据
+    front_data = load_colony_data(front_dir)
+    back_data = load_colony_data(back_dir)
+    
+    logging.info(f"  加载 Front 数据: {len(front_data)} 个菌落")
+    logging.info(f"  加载 Back 数据: {len(back_data)} 个菌落")
+    
+    if not front_data and not back_data:
+        logging.warning(f"{replicate_dir} 缺少前后视角数据，跳过配对")
+        return
+    
+    # 执行配对
+    merged = match_and_merge_colonies(front_data, back_data, max_distance)
+    
+    # 保存结果
+    combined_dir = replicate_dir / "Combined" / "results"
+    combined_dir.mkdir(parents=True, exist_ok=True)
+    
+    output_file = combined_dir / "merged.json"
+    try:
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(merged, f, indent=2, ensure_ascii=False)
+        logging.info(f"  保存配对结果: {output_file} ({len(merged)} 条)")
+    except Exception as e:
+        logging.error(f"  保存配对结果失败: {e}")
