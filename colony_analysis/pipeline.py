@@ -63,6 +63,7 @@ class AnalysisPipeline:
     def __init__(self, args):
         """初始化分析管道"""
         self.args = args
+        self.cfg = getattr(args, 'cfg', {})
         self.start_time = None
         self.config = None
         self.sam_model = None
@@ -72,10 +73,10 @@ class AnalysisPipeline:
         # 在 __init__ 末尾
         # 配置目录名为 'configs'
         self.cfg_loader = ConfigLoader("configs")
-        # SAM 3.0 模型路径
-        self.seg_sam = SamSegmenter(model_path="model/sam_vit_h_4b8939.pth", model_type=self.args.model)
-        # U-Net后备模型路径
-        self.seg_unet = UnetSegmenter(model_path="model/unet_fallback.pth")
+        sam_path = self.cfg.get('model_path', "model/sam_vit_h_4b8939.pth")
+        self.seg_sam = SamSegmenter(model_path=sam_path, model_type=self.args.model)
+        unet_path = self.cfg.get('unet_model_path', "model/unet_fallback.pth")
+        self.seg_unet = UnetSegmenter(model_path=unet_path)
     def _correct_plate_perspective(self, img_rgb):
         """
         Use chessboard corner detection to attempt perspective correction
@@ -536,6 +537,10 @@ class AnalysisPipeline:
             self.config.detection.min_colony_area = max(
                 1000, self.config.detection.min_colony_area // 2
             )
+        if 'min_colony_area' in self.cfg:
+            self.config.detection.min_colony_area = self.cfg['min_colony_area']
+        if 'color_enhance' in self.cfg:
+            self.config.detection.use_preprocessing = self.cfg['color_enhance']
 
     def _load_and_validate_image(self):
         """加载和验证图像"""
@@ -582,8 +587,8 @@ class AnalysisPipeline:
 
         # 4) Fallback到U-Net
         used = "sam"
-        if not filtered_masks:
-            logging.info("SAM无结果或过滤后为空，启用U-Net后备")
+        if (not filtered_masks or len(filtered_masks) < self.cfg.get('fallback_min_colonies', 0)) and self.cfg.get('use_unet_fallback', False):
+            logging.info("SAM无结果或过滤后不足，启用U-Net后备")
             fallback_mask = self.seg_unet.segment(img_proc)
             filtered_masks = [fallback_mask]
             used = "unet"
