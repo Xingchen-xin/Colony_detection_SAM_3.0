@@ -1,0 +1,3 @@
+unet_model_path: "models/unet_segmenter.pth"
+fallback_min_colonies: 5
+output_dir: "results/"

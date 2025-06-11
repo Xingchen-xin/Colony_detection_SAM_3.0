@@ -10,6 +10,7 @@ Colony Detection SAM 3.0 - 完整重构版本
 # ============================================================================
 
 import argparse
+import cfg_loader
 import logging
 import sys
 import time
@@ -116,6 +117,8 @@ def parse_arguments():
     parser.add_argument(
         "--min-area", type=int, default=2000, help="最小菌落面积 (默认: 2000)"
     )
+    parser.add_argument("--medium", required=True, help="培养基名称")
+    parser.add_argument("--side", required=True, choices=["front", "back"], help="图像正面或背面")
 
     return parser.parse_args()
 
@@ -194,17 +197,20 @@ def main():
             if cont != "y":
                 return 0
 
+        cfg = cfg_loader.load_config(args.medium, args.side)
         for img in images:
             img_output = Path(args.output)
-            sample_name = medium = orientation = replicate = None
+            sample_name = replicate = None
             stem = Path(img).stem
             # 根据文件名推断输出结构
             try:
-                sample_name, medium, orientation, replicate = parse_filename(stem)
+                sample_name, _, _, replicate = parse_filename(stem)
             except Exception:
                 pass
 
-            if sample_name and medium and orientation and replicate:
+            orientation = args.side
+            medium = args.medium
+            if sample_name and replicate:
                 output_path = get_output_path(stem, replicate, orientation, args.output)
                 os.makedirs(output_path, exist_ok=True)
                 img_output = Path(output_path)
@@ -220,6 +226,7 @@ def main():
             img_args.medium = medium
             img_args.orientation = orientation
             img_args.replicate = replicate
+            img_args.cfg = cfg
             pipeline = AnalysisPipeline(img_args)
             results = pipeline.run()
             print_completion_summary(results)

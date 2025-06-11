@@ -1,0 +1,10 @@
+front:
+  model_path: "models/MM_front_detector.pth"
+  min_colony_area: 45
+  color_enhance: true
+  use_unet_fallback: true
+back:
+  model_path: "models/MM_back_detector.pth"
+  min_colony_area: 30
+  color_enhance: false
+  use_unet_fallback: true
