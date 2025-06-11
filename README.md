@@ -8,6 +8,7 @@
 ```bash
 pip install -r requirements.txt
 ```
+依赖列表现在包含 `openpyxl`，用于将配对结果导出为 Excel 文件。
 
 ### 运行批量分析
 ```bash
@@ -29,6 +30,16 @@ python pipeline.py -i ../Image_input -o ../results
 - `<medium>` 为 `R5` 或 `MMM`
 - `<orientation>` 为 `Back` 或 `Front`
 - `<replicate>` 可选，两位数字，缺省为 `01`
+
+配置文件 `config.yaml` 允许按培养基和拍摄角度覆盖参数，例如：
+
+```yaml
+medium_params:
+  mm:
+    back:
+      detection:
+        background_filter: false
+```
 
 ### 结果目录结构
 ```

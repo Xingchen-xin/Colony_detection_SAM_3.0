@@ -86,3 +86,7 @@ medium_params:
       stability_score_thresh: 0.65
     detection:
       min_colony_area: 400
+    back:
+      detection:
+        background_filter: false
+        adaptive_gradient_thresh: 15
