@@ -134,21 +134,33 @@ class AnalysisPipeline:
             self._initialize_components()
 
             # —— 应用培养基特定参数覆盖 —— 
-            med = getattr(self.args, "medium", "").lower()
-            mp = getattr(self.config, "medium_params", {}).get(med, {})
+            med = getattr(self.args, 'medium', '').lower()
+            ori = getattr(self.args, 'orientation', '').lower()
+            mp = getattr(self.config, 'medium_params', {}).get(med, {})
             if mp:
-                # 覆盖检测阈值
-                det_conf = getattr(self.config, "detection", None)
-                if det_conf and "detection" in mp:
-                    for k, v in mp["detection"].items():
+                det_conf = getattr(self.config, 'detection', None)
+                ori_mp = mp.get(ori, {}) if isinstance(mp.get(ori, {}), dict) else {}
+                if det_conf and 'detection' in mp:
+                    for k, v in mp['detection'].items():
                         if hasattr(det_conf, k):
                             setattr(det_conf, k, v)
-                # 覆盖 SAM 参数
-                if hasattr(self, "sam_model") and hasattr(self.sam_model, "params") and "sam" in mp:
-                    for k, v in mp["sam"].items():
-                        if k in self.sam_model.params:
-                            self.sam_model.params[k] = v
-                logging.info(f"Applied medium-specific overrides for '{med}': {mp}")
+                if det_conf and 'detection' in ori_mp:
+                    for k, v in ori_mp['detection'].items():
+                        if hasattr(det_conf, k):
+                            setattr(det_conf, k, v)
+                if hasattr(self, 'sam_model') and hasattr(self.sam_model, 'params'):
+                    if 'sam' in mp:
+                        for k, v in mp['sam'].items():
+                            if k in self.sam_model.params:
+                                self.sam_model.params[k] = v
+                    if 'sam' in ori_mp:
+                        for k, v in ori_mp['sam'].items():
+                            if k in self.sam_model.params:
+                                self.sam_model.params[k] = v
+                if ori_mp:
+                    logging.info(f"Applied medium/orientation overrides for '{med}' '{ori}': {ori_mp}")
+                else:
+                    logging.info(f"Applied medium-specific overrides for '{med}': {mp}")
 
             # 2. 加载和验证图像
             img_rgb = self._load_and_validate_image()
