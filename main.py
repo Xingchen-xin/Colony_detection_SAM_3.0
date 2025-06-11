@@ -1,6 +1,7 @@
+
 #!/usr/bin/env python3
 """
-Colony Detection SAM 2.0 - 完整重构版本
+Colony Detection SAM 3.0 - 完整重构版本
 基于SAM的链霉菌菌落检测和分析工具
 """
 

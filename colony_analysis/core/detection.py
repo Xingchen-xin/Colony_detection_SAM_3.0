@@ -1753,3 +1753,21 @@ class ColonyDetector:
         }
 
         return colony["quality_score"]
+    def _extract_colonies_from_mask(self, img: np.ndarray, mask: np.ndarray, mode: str):
+        """
+        从单个mask中按连通区域分离菌落，与原detect接口格式兼容。
+        mode: 'sam' 或 'unet'
+        """
+        colonies = []
+        contours, _ = cv2.findContours(
+            mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        for idx, cont in enumerate(contours):
+            submask = np.zeros_like(mask, dtype=bool)
+            cv2.drawContours(submask, [cont], -1, 1, thickness=-1)
+            colony_data = self._extract_colony_data(
+                img, submask, f"{mode}_{idx}", mode
+            )
+            if colony_data:
+                colonies.append(colony_data)
+        return colonies

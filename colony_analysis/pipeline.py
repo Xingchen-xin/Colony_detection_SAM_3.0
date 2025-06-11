@@ -12,7 +12,9 @@ from tqdm import tqdm
 
 import cv2
 import numpy as np
-
+from colony_analysis.config.config_loader import ConfigLoader
+from colony_analysis.segmenters.sam_segmenter import SamSegmenter
+from colony_analysis.segmenters.unet_segmenter import UnetSegmenter
 from .analysis import ColonyAnalyzer
 from .config import ConfigManager
 from .core import ColonyDetector, SAMModel, combine_metrics
@@ -24,6 +26,36 @@ from .utils import (
     parse_filename,
 )
 
+def save_debug_images(stage: str, img: np.ndarray, masks: List[np.ndarray], debug_root: str):
+    """
+    在 debug_root 下按 stage 保存可视化图像。
+    """
+    stage_dir = os.path.join(debug_root, stage)
+    os.makedirs(stage_dir, exist_ok=True)
+    for i, mask in enumerate(masks):
+        vis = img.copy()
+        color = [0, 255, 0] if stage.startswith("sam") else [0, 0, 255]
+        vis[mask > 0] = color
+        filename = os.path.join(stage_dir, f"{stage}_{i}.png")
+        cv2.imwrite(filename, cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
+
+def filter_sam_masks(masks: List[np.ndarray], scores: List[float], det_conf) -> List[np.ndarray]:
+    """
+    根据检测配置过滤SAM掩码列表，返回被保留的掩码。
+    """
+    filtered = []
+    for mask, score in zip(masks, scores or []):
+        area = int(np.sum(mask))
+        if area < det_conf.min_colony_area:
+            continue
+        if hasattr(det_conf, "max_colony_area") and area > det_conf.max_colony_area:
+            continue
+        if det_conf.background_filter:
+            h, w = mask.shape
+            if area > h * w * det_conf.max_background_ratio:
+                continue
+        filtered.append(mask)
+    return filtered
 
 class AnalysisPipeline:
     """分析管道 - 协调整个分析流程"""
@@ -37,6 +69,13 @@ class AnalysisPipeline:
         self.detector = None
         self.analyzer = None
         self.result_manager = None
+        # 在 __init__ 末尾
+        # 配置目录名为 'configs'
+        self.cfg_loader = ConfigLoader("configs")
+        # SAM 3.0 模型路径
+        self.seg_sam = SamSegmenter(model_path="model/sam_vit_h_4b8939.pth", model_type=self.args.model)
+        # U-Net后备模型路径
+        self.seg_unet = UnetSegmenter(model_path="model/unet_fallback.pth")
     def _correct_plate_perspective(self, img_rgb):
         """
         Use chessboard corner detection to attempt perspective correction
@@ -132,35 +171,21 @@ class AnalysisPipeline:
         try:
             # 1. 初始化组件
             self._initialize_components()
-
+            # 加载条件化配置（medium/orientation）
+            sample_path = self.args.image if self.args.image else self.args.input_dir
+            cond_cfg = self.cfg_loader.load_for_image(str(sample_path))
             # —— 应用培养基特定参数覆盖 —— 
-            med = getattr(self.args, 'medium', '').lower()
-            ori = getattr(self.args, 'orientation', '').lower()
-            mp = getattr(self.config, 'medium_params', {}).get(med, {})
-            if mp:
-                det_conf = getattr(self.config, 'detection', None)
-                ori_mp = mp.get(ori, {}) if isinstance(mp.get(ori, {}), dict) else {}
-                if det_conf and 'detection' in mp:
-                    for k, v in mp['detection'].items():
-                        if hasattr(det_conf, k):
-                            setattr(det_conf, k, v)
-                if det_conf and 'detection' in ori_mp:
-                    for k, v in ori_mp['detection'].items():
-                        if hasattr(det_conf, k):
-                            setattr(det_conf, k, v)
-                if hasattr(self, 'sam_model') and hasattr(self.sam_model, 'params'):
-                    if 'sam' in mp:
-                        for k, v in mp['sam'].items():
-                            if k in self.sam_model.params:
-                                self.sam_model.params[k] = v
-                    if 'sam' in ori_mp:
-                        for k, v in ori_mp['sam'].items():
-                            if k in self.sam_model.params:
-                                self.sam_model.params[k] = v
-                if ori_mp:
-                    logging.info(f"Applied medium/orientation overrides for '{med}' '{ori}': {ori_mp}")
-                else:
-                    logging.info(f"Applied medium-specific overrides for '{med}': {mp}")
+            # —— 应用条件化配置 —— 
+            det_conf = getattr(self.config, "detection", None)
+            if det_conf and "detection" in cond_cfg:
+                for k, v in cond_cfg["detection"].items():
+                    if hasattr(det_conf, k):
+                        setattr(det_conf, k, v)
+            if "sam" in cond_cfg:
+                for k, v in cond_cfg["sam"].items():
+                    if hasattr(self.seg_sam.mask_generator, k):
+                        setattr(self.seg_sam.mask_generator, k, v)
+            logging.info(f"Loaded condition config: {cond_cfg}")
 
             # 2. 加载和验证图像
             img_rgb = self._load_and_validate_image()
@@ -536,70 +561,74 @@ class AnalysisPipeline:
         return img_rgb
 
     def _detect_colonies(self, img_rgb):
-        """执行菌落检测"""
-        logging.info("开始菌落检测...")
+        """执行菌落检测: 预处理→SAM分割→过滤→Fallback→重命名Debug输出"""
+        import os
+        from pathlib import Path
+        from colony_analysis.utils.sam_utils import save_debug_images, filter_sam_masks
+        logging.info("开始菌落检测: 预处理并使用SAM")
+        # 1) 预处理
+        img_proc = self.detector._preprocess_image(img_rgb)
+        debug_root = Path(self.args.output) / "debug"
 
-        colonies = self.detector.detect(img_rgb, mode=self.args.mode)
+        # 2) SAM分割
+        masks, scores = self.seg_sam.mask_generator.generate(img_proc), None
+        if self.args.debug:
+            save_debug_images("sam_raw", img_proc, masks, str(debug_root))
 
-        if not colonies:
-            logging.warning("未检测到任何菌落，将继续生成调试信息")
-            return []
+        # 3) 过滤SAM结果
+        filtered_masks = filter_sam_masks(masks, scores or [], self.config.detection)
+        if self.args.debug:
+            save_debug_images("sam_filtered", img_proc, filtered_masks, str(debug_root))
 
-        logging.info(f"检测到 {len(colonies)} 个菌落")
+        # 4) Fallback到U-Net
+        used = "sam"
+        if not filtered_masks:
+            logging.info("SAM无结果或过滤后为空，启用U-Net后备")
+            fallback_mask = self.seg_unet.segment(img_proc)
+            filtered_masks = [fallback_mask]
+            used = "unet"
+            if self.args.debug:
+                save_debug_images("unet_fallback", img_proc, filtered_masks, str(debug_root))
 
-        # ======== 自动重命名 unmapped 的 Debug 图为对应的孔位标签 ========
-        debug_dir = Path(self.args.output) / "debug"
+        # 5) 提取colonies
+        colonies = []
+        for idx, mask in enumerate(filtered_masks):
+            cols = self.detector._extract_colonies_from_mask(img_rgb, mask, f"{used}_{idx}")
+            colonies.extend(cols)
+
+        logging.info(f"初步检测到 {len(colonies)} 个菌落")
+
+        # 6) 调用原有 Debug 重命名逻辑
+        # unmapped 重命名
         for colony in colonies:
             original_id = colony.get("id", "")
             well_id = colony.get("well_position", "")
-            if (
-                original_id.startswith("colony_")
-                and well_id
-                and not well_id.startswith("unmapped")
-            ):
+            if original_id.startswith("colony_") and well_id and not well_id.startswith("unmapped"):
                 idx = original_id.split("_")[1]
-                # 重命名自动检测阶段的调试图
-                old_name = f"debug_colony_unmapped_{idx}.png"
-                new_name = f"debug_colony_{well_id}_{idx}.png"
-                old_path = debug_dir / old_name
-                new_path = debug_dir / new_name
-                if old_path.exists():
-                    os.rename(str(old_path), str(new_path))
-                # 重命名 raw SAM 掩码调试图
+                old = f"debug_colony_unmapped_{idx}.png"
+                new = f"debug_colony_{well_id}_{idx}.png"
+                old_path = debug_root / old
+                new_path = debug_root / new
+                if old_path.exists(): os.rename(str(old_path), str(new_path))
                 old_raw = f"debug_raw_mask_unmapped_{idx}.png"
                 new_raw = f"debug_raw_mask_{well_id}_{idx}.png"
-                old_raw_path = debug_dir / old_raw
-                new_raw_path = debug_dir / new_raw
-                if old_raw_path.exists():
-                    os.rename(str(old_raw_path), str(new_raw_path))
-        # ======== unmapped Debug 重命名结束 ========
+                old_raw_path = debug_root / old_raw
+                new_raw_path = debug_root / new_raw
+                if old_raw_path.exists(): os.rename(str(old_raw_path), str(new_raw_path))
 
-        # ======== 同样重命名蓝/红 debug 代谢图，匹配到相应孔位 ========
-        # 假设 blue/red 图保存在 debug/ 目录下，文件名格式为 blue_{cy}_{cx}.png 或 red_{cy}_{cx}.png
-        metabolite_debug_dir = Path(self.args.output) / "debug"
-        if metabolite_debug_dir and metabolite_debug_dir.exists():
-            for colony in colonies:
-                well_id = colony.get("well_position", "")
-                if well_id and not well_id.startswith("unmapped"):
-                    # 获取质心坐标
-                    centroid = colony.get("centroid", None)
-                    if centroid:
-                        cy, cx = int(centroid[0]), int(centroid[1])
-                        # 蓝色代谢图
-                        old_blue = f"blue_{cy}_{cx}.png"
-                        new_blue = f"blue_{well_id}_{cy}_{cx}.png"
-                        old_blue_path = metabolite_debug_dir / old_blue
-                        new_blue_path = metabolite_debug_dir / new_blue
-                        if old_blue_path.exists():
-                            os.rename(str(old_blue_path), str(new_blue_path))
-                        # 红色代谢图
-                        old_red = f"red_{cy}_{cx}.png"
-                        new_red = f"red_{well_id}_{cy}_{cx}.png"
-                        old_red_path = metabolite_debug_dir / old_red
-                        new_red_path = metabolite_debug_dir / new_red
-                        if old_red_path.exists():
-                            os.rename(str(old_red_path), str(new_red_path))
-        # ======== 蓝/红 debug 重命名结束 ========
+        # 蓝/红代谢图重命名
+        for colony in colonies:
+            well_id = colony.get("well_position", "")
+            if well_id and not well_id.startswith("unmapped"):
+                centroid = colony.get("centroid")
+                if centroid:
+                    cy, cx = int(centroid[0]), int(centroid[1])
+                    for color in ["blue", "red"]:
+                        old_name = f"{color}_{cy}_{cx}.png"
+                        new_name = f"{color}_{well_id}_{cy}_{cx}.png"
+                        old_p = debug_root / old_name
+                        new_p = debug_root / new_name
+                        if old_p.exists(): os.rename(str(old_p), str(new_p))
 
         return colonies
 
