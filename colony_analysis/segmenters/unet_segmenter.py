@@ -29,7 +29,12 @@ class UnetSegmenter:
         )
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Unet model weights not found: {model_path}")
-        state_dict = torch.load(model_path, map_location=self.device)
+        map_loc = (
+            (lambda storage, loc: storage.cpu())
+            if self.device.type == "cpu"
+            else self.device
+        )
+        state_dict = torch.load(model_path, map_location=map_loc)
         self.model.load_state_dict(state_dict, strict=False)
         self.model.to(self.device)
         self.model.eval()
