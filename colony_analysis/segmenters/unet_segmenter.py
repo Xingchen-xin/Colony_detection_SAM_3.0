@@ -2,15 +2,23 @@ import os
 from typing import Optional
 
 import numpy as np
-import torch
-import torch.nn.functional as F
-import segmentation_models_pytorch as smp
+
+try:
+    import torch
+    import torch.nn.functional as F
+    import segmentation_models_pytorch as smp
+except Exception:  # pragma: no cover - optional dependency
+    torch = None
+    F = None
+    smp = None
 
 
 class UnetSegmenter:
     """Simple U-Net based segmenter used as a fallback when SAM masks fail."""
 
     def __init__(self, model_path: str, device: Optional[str] = None, threshold: float = 0.5) -> None:
+        if torch is None or smp is None:
+            raise ImportError("PyTorch and segmentation_models_pytorch are required for UnetSegmenter")
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.threshold = threshold
         self.model = smp.Unet(
