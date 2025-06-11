@@ -12,8 +12,9 @@ pip install -r requirements.txt
 
 ### 运行批量分析
 ```bash
-python main.py --input-dir Image_input --output results
+python main.py --input-dir Image_input --output results [--device cpu|cuda]
 ```
+默认在检测到 GPU 时使用 `cuda`，可通过 `--device cpu` 强制在 CPU 上运行。
 或直接调用管道：
 ```bash
 cd colony_analysis

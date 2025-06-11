@@ -1,5 +1,5 @@
 import os
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 import numpy as np
 
 try:
@@ -8,13 +8,11 @@ except Exception:  # pragma: no cover - optional dependency
     SAMModel = None
 
 
-from typing import Optional
-
 class SamSegmenter:
     """Wrapper around :class:`SAMModel` providing a simple interface for the
     pipeline."""
 
-    def __init__(self, model_path: str = None, model_type: str = "vit_b") -> None:
+    def __init__(self, model_path: str = None, model_type: str = "vit_b", device: Optional[str] = None) -> None:
         if SAMModel is None:
             raise ImportError("SAMModel is required for SamSegmenter")
         # ``SAMModel`` resolves a default checkpoint path if ``model_path`` is None
