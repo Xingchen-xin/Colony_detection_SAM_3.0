@@ -1,7 +1,7 @@
 # ============================================================================
 # 5. colony_analysis/core/sam_model.py - SAM模型封装
 # ============================================================================
-
+import inspect
 import logging
 import os
 from pathlib import Path
@@ -15,13 +15,16 @@ from segment_anything import (SamAutomaticMaskGenerator, SamPredictor,
 from tqdm import tqdm
 
 
+
 class SAMModel:
     """统一的SAM模型封装类"""
 
-    def __init__(self, model_type="vit_b", checkpoint_path=None, config=None):
+    def __init__(self, model_type="vit_b", checkpoint_path=None, config=None, device: Optional[str] = None):
         """初始化SAM模型"""
         self.model_type = model_type
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Allow override via constructor, fallback to CUDA if available
+        requested = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(requested)
         self.checkpoint_path = self._resolve_checkpoint_path(
             checkpoint_path, model_type
         )
@@ -29,6 +32,26 @@ class SAMModel:
 
         self._load_model()
         logging.info(f"SAM模型已初始化 ({model_type})，设备: {self.device}")
+
+    def _load_model(self):
+        """
+        加载SAM模型到指定设备，手动加载权重以确保 map_location 正确。
+        """
+        # Instantiate SAM model class without loading checkpoint
+        ModelClass = sam_model_registry[self.model_type]
+        sig = inspect.signature(ModelClass)
+        if 'checkpoint' in sig.parameters:
+            self.sam = ModelClass(checkpoint=None)
+        else:
+            self.sam = ModelClass()
+        # Manually load the checkpoint with map_location
+        state = torch.load(self.checkpoint_path, map_location=self.device)
+        if isinstance(state, dict) and 'model_state_dict' in state:
+            state = state['model_state_dict']
+        self.sam.load_state_dict(state, strict=False)
+        self.sam.to(self.device)
+        self.predictor = SamPredictor(self.sam)
+        self.mask_generator = SamAutomaticMaskGenerator(self.sam, **self.params)
 
     def _resolve_checkpoint_path(
         self, checkpoint_path: Optional[str], model_type: str
@@ -83,28 +106,6 @@ class SAMModel:
 
         return default_params
 
-    def _load_model(self):
-        """加载SAM模型和初始化组件"""
-        try:
-            # 加载SAM模型
-            self.sam = sam_model_registry[self.model_type](
-                checkpoint=self.checkpoint_path
-            )
-            self.sam.to(device=self.device)
-
-            # 初始化预测器
-            self.predictor = SamPredictor(self.sam)
-
-            # 初始化自动掩码生成器
-            self.mask_generator = SamAutomaticMaskGenerator(
-                model=self.sam, **self.params
-            )
-
-            logging.info(f"SAM模型加载成功，参数: {self.params}")
-
-        except Exception as e:
-            logging.error(f"加载SAM模型失败: {e}")
-            raise
 
     def segment_everything(
         self, image: np.ndarray, min_area: int = 25, max_area: Optional[int] = None

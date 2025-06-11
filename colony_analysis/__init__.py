@@ -15,7 +15,7 @@ __author__ = "Colony Analysis Team"
 
 from .analysis import ColonyAnalyzer, FeatureExtractor, ScoringSystem
 # 导入主要类
-from .config import ConfigManager
+from .config.config_loader import ConfigLoader
 from .core import ColonyDetector, SAMModel
 from .utils import LogManager, ResultManager, Visualizer
 

@@ -62,6 +62,9 @@ class AnalysisPipeline:
 
     def __init__(self, args):
         """初始化分析管道"""
+        if not hasattr(args, "device"):
+            args.device = "cuda"
+        self.args = args
         self.args = args
         self.cfg = getattr(args, 'cfg', {})
         self.start_time = None
@@ -72,11 +75,17 @@ class AnalysisPipeline:
         self.result_manager = None
         # 在 __init__ 末尾
         # 配置目录名为 'configs'
-        self.cfg_loader = ConfigLoader("configs")
+        cfg_source = self.args.config or "configs"
+        # 如果用户传的是文件，则用文件所在目录；否则认为它是目录
+        if os.path.isfile(cfg_source):
+            cfg_dir = str(Path(cfg_source).parent)
+        else:
+            cfg_dir = cfg_source
+        self.cfg_loader = ConfigLoader(cfg_dir)
         sam_path = self.cfg.get('model_path', "models/sam_vit_h_4b8939.pth")
-        self.seg_sam = SamSegmenter(model_path=sam_path, model_type=self.args.model)
+        self.seg_sam = SamSegmenter(model_path=sam_path, model_type=self.args.model, device=self.args.device)
         unet_path = self.cfg.get('unet_model_path', "models/unet_fallback.pth")
-        self.seg_unet = UnetSegmenter(model_path=unet_path)
+        self.seg_unet = UnetSegmenter(model_path=unet_path, device=self.args.device)
     def _correct_plate_perspective(self, img_rgb):
         """
         Use chessboard corner detection to attempt perspective correction
@@ -569,7 +578,7 @@ class AnalysisPipeline:
         """执行菌落检测: 预处理→SAM分割→过滤→Fallback→重命名Debug输出"""
         import os
         from pathlib import Path
-        from colony_analysis.utils.sam_utils import save_debug_images, filter_sam_masks
+        # from colony_analysis.utils.sam_utils import save_debug_images, filter_sam_masks
         logging.info("开始菌落检测: 预处理并使用SAM")
         # 1) 预处理
         img_proc = self.detector._preprocess_image(img_rgb)

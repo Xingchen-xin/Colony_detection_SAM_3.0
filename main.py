@@ -119,7 +119,7 @@ def parse_arguments():
     )
     parser.add_argument("--medium", required=True, help="培养基名称")
     parser.add_argument("--side", required=True, choices=["front", "back"], help="图像正面或背面")
-
+    parser.add_argument("--device", choices=["cpu","cuda"], default="cuda", help="运行设备")
     return parser.parse_args()
 
 
