@@ -71,3 +71,18 @@ logging:
   log_to_file: true             # 是否记录到文件
   log_dir: null                 # 日志目录 (null = 自动)
   max_log_files: 10             # 最大日志文件数
+
+# 媒介特定的参数覆盖
+medium_params:
+  r5:
+    sam:
+      pred_iou_thresh: 0.90
+      stability_score_thresh: 0.80
+    detection:
+      min_colony_area: 600
+  mm:
+    sam:
+      pred_iou_thresh: 0.80
+      stability_score_thresh: 0.65
+    detection:
+      min_colony_area: 400

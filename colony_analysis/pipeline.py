@@ -62,9 +62,9 @@ class AnalysisPipeline:
             warped = cv2.warpPerspective(img_rgb, M, (width, height))
             return warped
         else:
-            logging.warning("透视校正：未检测到棋盘角点，保留原图")
+            logging.debug("透视校正：未检测到棋盘角点，保留原图")
             return img_rgb
-    def _self_calibrate_grid(self, centroids: list[tuple]):
+    def _self_calibrate_grid(self, centroids: list[tuple], rows: int, cols: int):
         """
         Infer a 12x8 well-plate grid by clustering colony centroids into rows and columns.
         centroids: list of (x, y) tuples.
@@ -72,7 +72,6 @@ class AnalysisPipeline:
         import numpy as np
         import cv2
 
-        rows, cols = self.args.rows, self.args.cols
         pts = np.array(centroids, dtype=np.float32)
         if len(pts) < rows + cols:
             logging.warning("质心数量不足，无法可靠自校准网格，使用静态网格")
@@ -134,23 +133,45 @@ class AnalysisPipeline:
             # 1. 初始化组件
             self._initialize_components()
 
+            # —— 应用培养基特定参数覆盖 —— 
+            med = getattr(self.args, "medium", "").lower()
+            mp = getattr(self.config, "medium_params", {}).get(med, {})
+            if mp:
+                # 覆盖检测阈值
+                det_conf = getattr(self.config, "detection", None)
+                if det_conf and "detection" in mp:
+                    for k, v in mp["detection"].items():
+                        if hasattr(det_conf, k):
+                            setattr(det_conf, k, v)
+                # 覆盖 SAM 参数
+                if hasattr(self, "sam_model") and hasattr(self.sam_model, "params") and "sam" in mp:
+                    for k, v in mp["sam"].items():
+                        if k in self.sam_model.params:
+                            self.sam_model.params[k] = v
+                logging.info(f"Applied medium-specific overrides for '{med}': {mp}")
+
             # 2. 加载和验证图像
             img_rgb = self._load_and_validate_image()
             # —— 全局透视校正，以对齐 96 孔板 —— 
             img_rgb = self._correct_plate_perspective(img_rgb)
+            # 安全获取孔板行列数
+            rows = getattr(self.args, "rows", None) or self.config.output.rows
+            cols = getattr(self.args, "cols", None) or self.config.output.cols
             # —— 动态自校准 96孔网格（基于初次自动检测的质心分布） —— 
             if getattr(self.args, "force_96plate_detection", False):
                 # 初次自动检测获取质心
                 auto_cols = self.detector.detect(img_rgb, mode="auto")
                 centroids = [c.get("centroid") for c in auto_cols if c.get("centroid") is not None]
                 if centroids:
-                    self._self_calibrate_grid(centroids)
+                    self._self_calibrate_grid(centroids, rows, cols)
+                    logging.info("动态网格设置完成")
             else:
-                # 保持原有静态网格方案
                 if not hasattr(self.config, "plate_grid"):
                     self.config.plate_grid = self.detector._create_plate_grid(
-                        img_rgb.shape[:2], self.args.rows, self.args.cols
-)
+                        img_rgb.shape[:2], rows, cols
+                    )
+                    logging.info(f"使用静态网格：{rows} 行 × {cols} 列")
+
 
             # 3. 执行检测
             if getattr(self.args, "force_96plate_detection", False):
@@ -170,7 +191,7 @@ class AnalysisPipeline:
                 }
                 missing = plate_wells - detected_wells
                 if missing:
-                    logging.warning(f"以下孔位未检测到任何菌落：{sorted(missing)}")
+                    logging.debug(f"以下孔位未检测到任何菌落：{sorted(missing)}")
 
             # 4. 如果未检测到菌落且开启调试，则保存原始 SAM 掩码用于排查
             if not colonies and self.args.debug:
@@ -228,8 +249,65 @@ class AnalysisPipeline:
 
         # 获取plate_grid: {well_id: {center, search_radius, ...}}
         plate_grid = self.config.plate_grid
-        # 1. 检测所有菌落
-        colonies = self.detector.detect(img_rgb, mode="grid")
+        """
+        强制96孔板检测：先做Back色素提示→Hybrid格子优先→全图检测
+        """
+        # —— 1) Back 侧颜色提示分割 —— 
+        colonies = []
+        if getattr(self.args, "orientation", "").lower() == "back":
+            logging.info("Back orientation: applying color-based SAM prompts")
+            hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV)
+            red_mask = (
+                ((hsv[:,:,0] < 10) | (hsv[:,:,0] > 170))
+                & (hsv[:,:,1] > 80)
+                & (hsv[:,:,2] > 80)
+            )
+            ys, xs = np.where(red_mask)
+            pts = list(zip(xs.tolist(), ys.tolist()))
+            if pts:
+                step = max(1, len(pts)//16)
+                for p in pts[::step]:
+                    try:
+                        mask, score = self.detector.segment_with_prompts(
+                            img_rgb, points=[list(p)], point_labels=[1]
+                        )
+                        data = self.detector._extract_colony_data(
+                            img_rgb, mask, f"color_{p}", "color_hint"
+                        )
+                        if data:
+                            data["sam_score"] = float(score)
+                            colonies.append(data)
+                    except Exception:
+                        continue
+                logging.info(f"Color prompts yielded {len(colonies)} candidates")
+
+        # —— 2) Hybrid 模式：先在每个格子里跑 SAM，再全图 auto 补充 —— 
+        rows = getattr(self.args, "rows", 8)
+        cols = getattr(self.args, "cols", 12)
+        if self.args.mode == "hybrid" and self.args.well_plate:
+            logging.info("Hybrid mode: grid-based SAM segmentation first")
+            masks, labels = self.detector.segment_grid(
+                img_rgb,
+                rows=rows,
+                cols=cols,
+                padding=self.config.detection.edge_margin_ratio
+            )
+            grid_cols = []
+            for mask, lab in zip(masks, labels):
+                if mask.sum() > 0:
+                    c = self.detector._extract_colony_data(
+                        img_rgb, mask, f"grid_{lab}", "grid"
+                    )
+                    c["well_position"] = lab
+                    grid_cols.append(c)
+            logging.info(f"Grid segmentation found {len(grid_cols)} colonies, now auto-detect")
+            auto_cols = self.detector.detect(img_rgb, mode="auto")
+            colonies += grid_cols + auto_cols
+        else:
+            # 其他模式或非孔板，直接调用
+            colonies += self.detector.detect(img_rgb, mode=self.args.mode)
+
+
         # 2. 分配菌落到最近well_id
         well_to_candidates = {well: [] for well in plate_grid}
         for c in colonies:
@@ -485,8 +563,8 @@ class AnalysisPipeline:
         # ======== unmapped Debug 重命名结束 ========
 
         # ======== 同样重命名蓝/红 debug 代谢图，匹配到相应孔位 ========
-        # 假设 blue/red 图保存在 debug_metabolite/ 目录下，文件名格式为 blue_{cy}_{cx}.png 或 red_{cy}_{cx}.png
-        metabolite_debug_dir = Path(self.args.output) / "debug_metabolite"
+        # 假设 blue/red 图保存在 debug/ 目录下，文件名格式为 blue_{cy}_{cx}.png 或 red_{cy}_{cx}.png
+        metabolite_debug_dir = Path(self.args.output) / "debug"
         if metabolite_debug_dir and metabolite_debug_dir.exists():
             for colony in colonies:
                 well_id = colony.get("well_position", "")
@@ -620,6 +698,8 @@ def batch_medium_pipeline(input_folder: str, output_folder: str):
                         orientation=orientation,
                         medium=medium,
                     )
+                    args.rows = 8
+                    args.cols = 12
                     pipeline = AnalysisPipeline(args)
                     pipeline.run()
             # Automatically pair front/back results if both present
