@@ -52,3 +52,4 @@ mypy>=0.800
 # 文档生成
 sphinx>=3.4.0
 sphinx-rtd-theme>=0.5.0
+segmentation_models_pytorch>=0.3.3
