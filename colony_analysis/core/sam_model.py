@@ -44,8 +44,11 @@ class SAMModel:
             self.sam = ModelClass(checkpoint=None)
         else:
             self.sam = ModelClass()
-        # Manually load the checkpoint with map_location
-        state = torch.load(self.checkpoint_path, map_location=self.device)
+        # 手动加载 checkpoint，根据 device 强制映射到 CPU 或 GPU
+        if self.device.type == "cpu":
+            state = torch.load(self.checkpoint_path, map_location="cpu")
+        else:
+            state = torch.load(self.checkpoint_path, map_location=self.device)
         if isinstance(state, dict) and 'model_state_dict' in state:
             state = state['model_state_dict']
         self.sam.load_state_dict(state, strict=False)
