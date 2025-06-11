@@ -67,4 +67,7 @@ results/
 - 通用工具如 `collect_all_images` 和 `parse_filename` 位于 `colony_analysis/utils/file_utils.py`。
 - 批量调度逻辑在 `colony_analysis/pipeline.py` 的 `batch_medium_pipeline` 函数中。
 
+### 更多文档
+- 轻量级分割与评估管线请参见 [docs/segmentation_pipeline.md](docs/segmentation_pipeline.md)
+
 欢迎提交 Issue 和 Pull Request!
