@@ -73,9 +73,9 @@ class AnalysisPipeline:
         # 在 __init__ 末尾
         # 配置目录名为 'configs'
         self.cfg_loader = ConfigLoader("configs")
-        sam_path = self.cfg.get('model_path', "model/sam_vit_h_4b8939.pth")
+        sam_path = self.cfg.get('model_path', "models/sam_vit_h_4b8939.pth")
         self.seg_sam = SamSegmenter(model_path=sam_path, model_type=self.args.model)
-        unet_path = self.cfg.get('unet_model_path', "model/unet_fallback.pth")
+        unet_path = self.cfg.get('unet_model_path', "models/unet_fallback.pth")
         self.seg_unet = UnetSegmenter(model_path=unet_path)
     def _correct_plate_perspective(self, img_rgb):
         """
