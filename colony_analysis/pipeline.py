@@ -509,8 +509,12 @@ class AnalysisPipeline:
         self.config.update_from_args(self.args)
         self._apply_medium_specific_config()
 
-        # SAM模型
-        self.sam_model = SAMModel(model_type=self.args.model, config=self.config)
+        # SAM模型 - 添加 device 参数
+        self.sam_model = SAMModel(
+            model_type=self.args.model, 
+            config=self.config,
+            device=getattr(self.args, 'device', 'cuda')   # 添加这一行
+        )
 
         # 结果管理器
         self.result_manager = ResultManager(self.args.output)
@@ -585,9 +589,11 @@ class AnalysisPipeline:
         debug_root = Path(self.args.output) / "debug"
 
         # 2) SAM分割
-        masks, scores = self.seg_sam.mask_generator.generate(img_proc), None
-        if self.args.debug:
-            save_debug_images("sam_raw", img_proc, masks, str(debug_root))
+        # 直接拿到原始列表
+        raw = self.seg_sam.mask_generator.generate(img_proc)
+        # 提取出真正的掩码和对应分数
+        masks  = [entry['segmentation'] for entry in raw]
+        scores = [entry.get('stability_score', 0.0) for entry in raw]
 
         # 3) 过滤SAM结果
         filtered_masks = filter_sam_masks(masks, scores or [], self.config.detection)
@@ -685,7 +691,7 @@ class AnalysisPipeline:
         }
 
 
-def batch_medium_pipeline(input_folder: str, output_folder: str):
+def batch_medium_pipeline(input_folder: str, output_folder: str, device: str = "cuda"):
     """批量处理多培养基、多角度、多重复的图像"""
     img_paths = collect_all_images(input_folder)
     if not img_paths:
@@ -752,6 +758,7 @@ def batch_medium_pipeline(input_folder: str, output_folder: str):
                         config=None,
                         orientation=orientation,
                         medium=medium,
+                        device=device,
                     )
                     args.rows = 8
                     args.cols = 12

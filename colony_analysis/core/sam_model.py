@@ -23,7 +23,16 @@ class SAMModel:
         """初始化SAM模型"""
         self.model_type = model_type
         # Allow override via constructor, fallback to CUDA if available
-        requested = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        if device is None:
+            # 检查环境变量 CUDA_VISIBLE_DEVICES
+            cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES', '')
+            if cuda_visible_devices == '':
+                # 如果 CUDA_VISIBLE_DEVICES 为空字符串，强制使用 CPU
+                requested = "cpu"
+            else:
+                requested = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            requested = device
         self.device = torch.device(requested)
         self.checkpoint_path = self._resolve_checkpoint_path(
             checkpoint_path, model_type

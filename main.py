@@ -10,7 +10,7 @@ Colony Detection SAM 3.0 - 完整重构版本
 # ============================================================================
 
 import argparse
-import cfg_loader
+from colony_analysis.config.settings import ConfigManager
 import logging
 import sys
 import time
@@ -185,7 +185,7 @@ def main():
                 cont = input("继续? [y/N]: ").strip().lower()
                 if cont != "y":
                     return 0
-            batch_medium_pipeline(args.input_dir, args.output)
+            batch_medium_pipeline(args.input_dir, args.output, device=args.device)
             pair_colonies_across_views(args.output)
             return 0
         else:
@@ -197,7 +197,10 @@ def main():
             if cont != "y":
                 return 0
 
-        cfg = cfg_loader.load_config(args.medium, args.side)
+        # load and merge config into a ConfigManager instance
+        config_manager = ConfigManager(args.config)
+        config_manager.update_from_args(args)
+        cfg = config_manager
         for img in images:
             img_output = Path(args.output)
             sample_name = replicate = None
