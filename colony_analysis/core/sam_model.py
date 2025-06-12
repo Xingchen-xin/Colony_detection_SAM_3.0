@@ -120,7 +120,7 @@ class SAMModel:
         return default_params
 
 
-    def segment_everything(
+    def segment_everything_original(
         self, image: np.ndarray, min_area: int = 25, max_area: Optional[int] = None
     ) -> Tuple[List[np.ndarray], List[float]]:
         """自动分割图像中的所有区域"""
@@ -149,6 +149,73 @@ class SAMModel:
             scores.append(score)
 
         return masks, scores
+
+    def segment_everything(self, image: np.ndarray, min_area: int = 25, max_area = None):
+        """修复版本的segment_everything方法"""
+    
+        # 预处理图像
+        image = self._preprocess_image(image)
+    
+        try:
+            # 生成掩码
+            masks_data = self.mask_generator.generate(image)
+        except Exception as e:
+            logging.error(f"SAM掩码生成失败: {e}")
+            return [], []
+    
+        if not masks_data:
+            logging.warning("SAM未生成任何掩码")
+            return [], []
+    
+        # 过滤和提取结果
+        masks = []
+        scores = []
+    
+        for i, mask_data in enumerate(tqdm(masks_data, desc="处理SAM掩码", ncols=80)):
+            try:
+                # 安全提取数据
+                if not isinstance(mask_data, dict):
+                    logging.warning(f"掩码数据 {i} 不是字典类型: {type(mask_data)}")
+                    continue
+                
+                mask = mask_data.get("segmentation")
+                score = mask_data.get("stability_score", 0.0)
+                area = mask_data.get("area", 0)
+            
+                # 验证数据类型
+                if mask is None or not isinstance(mask, np.ndarray):
+                    continue
+                
+                # 安全转换数值类型
+                try:
+                    area = int(float(area))
+                    score = float(score)
+                except (ValueError, TypeError):
+                    logging.warning(f"掩码 {i} 数值转换失败: area={area}, score={score}")
+                    continue
+            
+                # 验证参数类型
+                if not isinstance(min_area, (int, float)):
+                    min_area = 25
+                if max_area is not None and not isinstance(max_area, (int, float)):
+                    max_area = None
+
+                # 面积过滤
+                if area < min_area:
+                    continue
+                if max_area is not None and area > max_area:
+                    continue
+
+                masks.append(mask)
+                scores.append(score)
+            
+            except Exception as e:
+                logging.warning(f"处理掩码 {i} 时出错: {e}")
+                continue
+    
+        logging.info(f"SAM处理完成: {len(masks_data)} -> {len(masks)} 个有效掩码")
+        return masks, scores
+
 
     def segment_grid(
         self, image: np.ndarray, rows: int = 8, cols: int = 12, padding: float = 0.05

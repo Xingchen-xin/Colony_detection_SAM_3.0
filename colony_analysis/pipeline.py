@@ -251,6 +251,12 @@ class AnalysisPipeline:
                     "model": self.args.model,
                     "advanced": self.args.advanced,
                 }
+            # 4. 如果没有检测到菌落，记录调试信息
+            if not colonies:
+                logging.warning("未检测到任何菌落")
+                if self.args.debug:
+                    self._save_debug_info(img_rgb)
+                return self._generate_empty_summary()
 
             # 5. 执行分析
             analyzed_colonies = self._analyze_colonies(colonies)
@@ -282,7 +288,17 @@ class AnalysisPipeline:
 
         except Exception as e:
             logging.error(f"分析管道执行失败: {e}")
-            raise
+            import traceback
+            logging.debug(traceback.format_exc())
+
+            # 返回错误摘要
+            return {
+                "total_colonies": 0,
+                "elapsed_time": time.time() - self.start_time,
+                "output_dir": self.args.output,
+                "error": str(e),
+                "status": "failed"
+            }
 
     def _force_96plate_detection(self, img_rgb):
         """
@@ -504,38 +520,83 @@ class AnalysisPipeline:
         """初始化所有组件"""
         logging.info("初始化组件...")
 
-        # 配置管理器
-        self.config = ConfigManager(self.args.config)
-        self.config.update_from_args(self.args)
-        self._apply_medium_specific_config()
+        try:
+            # 配置管理器
+            self.config = ConfigManager(self.args.config)
+            self.config.update_from_args(self.args)
 
-        # SAM模型 - 添加 device 参数
-        self.sam_model = SAMModel(
-            model_type=self.args.model, 
-            config=self.config,
-            device=getattr(self.args, 'device', 'cuda')   # 添加这一行
-        )
+            # 验证配置
+            validate_detection_config(self.config.detection)
 
-        # 结果管理器
-        self.result_manager = ResultManager(self.args.output)
+            # 应用培养基特定配置
+            self._apply_medium_specific_config_safe()
+        
+            # SAM模型 - 添加错误处理
+            try:
+                self.sam_model = SAMModel(
+                    model_type=self.args.model, 
+                    config=self.config,
+                    device=getattr(self.args, 'device', 'cuda')
+                )
+            except Exception as e:
+                logging.error(f"SAM模型初始化失败: {e}")
+                # 尝试CPU fallback
+                self.sam_model = SAMModel(
+                    model_type=self.args.model, 
+                    config=self.config,
+                    device='cpu'
+                )
+        
+            # 结果管理器
+            self.result_manager = ResultManager(self.args.output)
+        
+            # 检测器
+            self.detector = ColonyDetector(
+                sam_model=self.sam_model,
+                config=self.config,
+                result_manager=self.result_manager,
+                debug=self.args.debug,
+            )
+        
+            # 分析器
+            self.analyzer = ColonyAnalyzer(
+                sam_model=self.sam_model,
+                config=self.config,
+                debug=self.args.debug,
+                orientation=getattr(self.args, "orientation", "front"),
+            )
+        
+            logging.info("组件初始化完成")
+        
+        except Exception as e:
+            logging.error(f"组件初始化失败: {e}")
+            raise
 
-        # 检测器
-        self.detector = ColonyDetector(
-            sam_model=self.sam_model,
-            config=self.config,
-            result_manager=self.result_manager,
-            debug=self.args.debug,
-        )
+    def _apply_medium_specific_config_safe(self):
+        """安全的培养基特定配置应用"""
+        try:
+            medium = getattr(self.args, "medium", "").lower()
 
-        # 分析器
-        self.analyzer = ColonyAnalyzer(
-            sam_model=self.sam_model,
-            config=self.config,
-            debug=self.args.debug,
-            orientation=getattr(self.args, "orientation", "front"),
-        )
+            if medium == "r5":
+                # R5 培养基适当提高最小菌落面积阈值
+                current_min = getattr(self.config.detection, 'min_colony_area', 800)
+                self.config.detection.min_colony_area = max(1500, current_min)
 
-        logging.info("组件初始化完成")
+            elif medium == "mmm":
+                # MMM 培养基可能菌落更小
+                current_min = getattr(self.config.detection, 'min_colony_area', 800)
+                self.config.detection.min_colony_area = max(1000, current_min // 2)
+        
+            # 安全应用外部配置
+            if hasattr(self, 'cfg') and isinstance(self.cfg, dict):
+                for key, value in self.cfg.items():
+                    if key == 'min_colony_area' and isinstance(value, (int, float)):
+                        self.config.detection.min_colony_area = int(value)
+                    elif key == 'color_enhance' and isinstance(value, bool):
+                        self.config.detection.use_preprocessing = value
+                    
+        except Exception as e:
+            logging.warning(f"应用培养基配置时出错: {e}")
 
     def _apply_medium_specific_config(self):
         """根据培养基调整参数（示例占位实现）"""
@@ -579,78 +640,105 @@ class AnalysisPipeline:
         return img_rgb
 
     def _detect_colonies(self, img_rgb):
-        """执行菌落检测: 预处理→SAM分割→过滤→Fallback→重命名Debug输出"""
-        import os
-        from pathlib import Path
-        # from colony_analysis.utils.sam_utils import save_debug_images, filter_sam_masks
-        logging.info("开始菌落检测: 预处理并使用SAM")
-        # 1) 预处理
-        img_proc = self.detector._preprocess_image(img_rgb)
-        debug_root = Path(self.args.output) / "debug"
+        """执行菌落检测 - 修复版本"""
+        logging.info("开始菌落检测...")
 
-        # 2) SAM分割
-        # 直接拿到原始列表
-        raw = self.seg_sam.mask_generator.generate(img_proc)
-        # 提取出真正的掩码和对应分数
-        masks  = [entry['segmentation'] for entry in raw]
-        scores = [entry.get('stability_score', 0.0) for entry in raw]
+        # 验证输入图像
+        if img_rgb is None or img_rgb.size == 0:
+            logging.error("输入图像无效")
+            return []
+    
+        try:
+            # 直接使用现有的ColonyDetector，不要重新实现
+            colonies = self.detector.detect(img_rgb, mode=self.args.mode)
+            logging.info(f"检测完成，发现 {len(colonies)} 个菌落")
+            return colonies
+        
+        except Exception as e:
+            logging.error(f"检测失败: {e}")
+            import traceback
+            logging.debug(traceback.format_exc())
+        
+            # 尝试使用简化的fallback方案
+            try:
+                logging.info("尝试fallback检测...")
+                return self._detect_colonies_simple_fallback(img_rgb)
+            except Exception as e2:
+                logging.error(f"Fallback检测也失败: {e2}")
+                return []
+    def _detect_colonies_simple_fallback(self, img_rgb):
+        """简化的fallback检测方案"""
+        try:
+            # 使用基本的SAM auto模式，跳过复杂的增强功能
+            processed_img = self.detector._preprocess_image(img_rgb)
 
-        # 3) 过滤SAM结果
-        filtered_masks = filter_sam_masks(masks, scores or [], self.config.detection)
-        if self.args.debug:
-            save_debug_images("sam_filtered", img_proc, filtered_masks, str(debug_root))
+            # 直接使用SAM生成掩码
+            masks, scores = self.detector.sam_model.segment_everything(
+                processed_img, 
+                min_area=500,  # 使用更宽松的阈值
+                max_area=30000
+            )
+        
+            colonies = []
+            for i, (mask, score) in enumerate(zip(masks[:50], scores[:50])):  # 限制数量
+                try:
+                    area = np.sum(mask)
+                    if 500 <= area <= 30000:  # 基本过滤
+                        colony_data = self.detector._extract_colony_data(
+                            img_rgb, mask, f"fallback_{i}", "fallback"
+                        )
+                        if colony_data:
+                            colony_data["sam_score"] = float(score)
+                            colonies.append(colony_data)
+                except Exception:
+                    continue
+                
+            logging.info(f"Fallback检测完成，发现 {len(colonies)} 个菌落")
+            return colonies
+        
+        except Exception as e:
+            logging.error(f"简化fallback检测失败: {e}")
+            return []
 
-        # 4) Fallback到U-Net
-        used = "sam"
-        if (not filtered_masks or len(filtered_masks) < self.cfg.get('fallback_min_colonies', 0)) and self.cfg.get('use_unet_fallback', False):
-            logging.info("SAM无结果或过滤后不足，启用U-Net后备")
-            fallback_mask = self.seg_unet.segment(img_proc)
-            filtered_masks = [fallback_mask]
-            used = "unet"
-            if self.args.debug:
-                save_debug_images("unet_fallback", img_proc, filtered_masks, str(debug_root))
+    def validate_detection_config(config):
+        """验证检测配置的数据类型"""
+        try:
+            # 检查并修复数值类型
+            numeric_fields = [
+                'min_colony_area', 'max_colony_area', 'expand_pixels',
+                'adaptive_gradient_thresh', 'adaptive_expand_iters',
+                'overlap_threshold', 'max_background_ratio', 'edge_contact_limit'
+            ]
+        
+            for field in numeric_fields:
+                if hasattr(config, field):
+                    value = getattr(config, field)
+                    if not isinstance(value, (int, float, np.integer, np.floating)):
+                        logging.warning(f"配置字段 {field} 类型错误: {type(value)}")
+                        # 设置默认值
+                        default_values = {
+                            'min_colony_area': 800,
+                            'max_colony_area': 50000,
+                            'expand_pixels': 2,
+                            'adaptive_gradient_thresh': 20,
+                            'adaptive_expand_iters': 25,
+                            'overlap_threshold': 0.4,
+                            'max_background_ratio': 0.2,
+                            'edge_contact_limit': 0.5
+                        }
+                        setattr(config, field, default_values.get(field, 0))
+        
+            # 检查布尔类型
+            bool_fields = ['merge_overlapping', 'use_preprocessing', 'background_filter']
+            for field in bool_fields:
+                if hasattr(config, field):
+                    value = getattr(config, field)
+                    if not isinstance(value, bool):
+                        setattr(config, field, bool(value))
+                    
+        except Exception as e:
+            logging.error(f"配置验证失败: {e}")
 
-        # 5) 提取colonies
-        colonies = []
-        for idx, mask in enumerate(filtered_masks):
-            cols = self.detector._extract_colonies_from_mask(img_rgb, mask, f"{used}_{idx}")
-            colonies.extend(cols)
-
-        logging.info(f"初步检测到 {len(colonies)} 个菌落")
-
-        # 6) 调用原有 Debug 重命名逻辑
-        # unmapped 重命名
-        for colony in colonies:
-            original_id = colony.get("id", "")
-            well_id = colony.get("well_position", "")
-            if original_id.startswith("colony_") and well_id and not well_id.startswith("unmapped"):
-                idx = original_id.split("_")[1]
-                old = f"debug_colony_unmapped_{idx}.png"
-                new = f"debug_colony_{well_id}_{idx}.png"
-                old_path = debug_root / old
-                new_path = debug_root / new
-                if old_path.exists(): os.rename(str(old_path), str(new_path))
-                old_raw = f"debug_raw_mask_unmapped_{idx}.png"
-                new_raw = f"debug_raw_mask_{well_id}_{idx}.png"
-                old_raw_path = debug_root / old_raw
-                new_raw_path = debug_root / new_raw
-                if old_raw_path.exists(): os.rename(str(old_raw_path), str(new_raw_path))
-
-        # 蓝/红代谢图重命名
-        for colony in colonies:
-            well_id = colony.get("well_position", "")
-            if well_id and not well_id.startswith("unmapped"):
-                centroid = colony.get("centroid")
-                if centroid:
-                    cy, cx = int(centroid[0]), int(centroid[1])
-                    for color in ["blue", "red"]:
-                        old_name = f"{color}_{cy}_{cx}.png"
-                        new_name = f"{color}_{well_id}_{cy}_{cx}.png"
-                        old_p = debug_root / old_name
-                        new_p = debug_root / new_name
-                        if old_p.exists(): os.rename(str(old_p), str(new_p))
-
-        return colonies
 
     def _analyze_colonies(self, colonies):
         """执行菌落分析"""
@@ -689,6 +777,47 @@ class AnalysisPipeline:
             "model": self.args.model,
             "advanced": self.args.advanced,
         }
+
+
+    def _generate_empty_summary(self):
+        """生成空结果摘要"""
+        return {
+            "total_colonies": 0,
+            "elapsed_time": time.time() - self.start_time,
+            "output_dir": self.args.output,
+            "mode": self.args.mode,
+            "model": self.args.model,
+            "advanced": self.args.advanced,
+            "status": "no_colonies_detected"
+        }
+
+    def _save_debug_info(self, img_rgb):
+        """保存调试信息"""
+        try:
+            debug_dir = self.result_manager.directories.get("debug", "debug")
+            os.makedirs(debug_dir, exist_ok=True)
+        
+            # 保存原始图像
+            import cv2
+            cv2.imwrite(
+                os.path.join(debug_dir, "original_image.jpg"),
+                cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+            )
+        
+            # 保存配置信息
+            config_info = {
+                "mode": self.args.mode,
+                "model": self.args.model,
+                "min_colony_area": getattr(self.config.detection, 'min_colony_area', 'unknown'),
+                "device": str(self.sam_model.device) if self.sam_model else 'unknown'
+            }
+        
+            with open(os.path.join(debug_dir, "config_info.json"), 'w') as f:
+                json.dump(config_info, f, indent=2)
+            
+        except Exception as e:
+            logging.error(f"保存调试信息失败: {e}")
+
 
 
 def batch_medium_pipeline(input_folder: str, output_folder: str, device: str = "cuda"):
