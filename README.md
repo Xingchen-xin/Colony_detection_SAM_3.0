@@ -77,6 +77,15 @@ python integrate_report.py -i <results_dir>
 
 会生成 `index.html`、每个条件下的汇总页以及各 replicate 的 `report.html`。
 
+### 演示幻灯片
+项目根目录提供 `make_presentation.py` 脚本，可生成简单的介绍幻灯片：
+
+```bash
+python make_presentation.py
+```
+
+运行后会得到 `Colony_Detection_Overview.pptx`，可在 PowerPoint 或 WPS 等办公软件中打开。
+
 
 ### 更多文档
 - 轻量级分割与评估管线请参见 [docs/segmentation_pipeline.md](docs/segmentation_pipeline.md)
