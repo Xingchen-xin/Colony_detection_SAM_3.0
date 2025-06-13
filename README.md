@@ -68,7 +68,18 @@ results/
 - 通用工具如 `collect_all_images` 和 `parse_filename` 位于 `colony_analysis/utils/file_utils.py`。
 - 批量调度逻辑在 `colony_analysis/pipeline.py` 的 `batch_medium_pipeline` 函数中。
 
+### 生成交互式报告
+分析完成后，在输出目录运行：
+
+```bash
+python integrate_report.py -i <results_dir>
+```
+
+会生成 `index.html`、每个条件下的汇总页以及各 replicate 的 `report.html`。
+
+
 ### 更多文档
 - 轻量级分割与评估管线请参见 [docs/segmentation_pipeline.md](docs/segmentation_pipeline.md)
+- 交互式报告系统设计参见 [docs/report_system_design.md](docs/report_system_design.md)
 
 欢迎提交 Issue 和 Pull Request!

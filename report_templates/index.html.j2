@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Colony Report</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <h1>Colony Detection Report</h1>
+  {% for cond, reps in conditions.items() %}
+  <h2><a href="conditions/{{ cond }}.html">{{ cond }}</a></h2>
+  <ul>
+    {% for rep in reps %}
+    <li><a href="{{ rep.page }}">{{ rep.name }}</a> ({{ rep.stats.count }} colonies)</li>
+    {% endfor %}
+  </ul>
+  {% endfor %}
+</body>
+</html>

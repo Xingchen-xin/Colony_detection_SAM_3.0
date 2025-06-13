@@ -1,0 +1,5 @@
+body { font-family: Arial, sans-serif; margin: 20px; }
+h1 { margin-top: 0; }
+.colony-img { max-width: 45%; margin-right: 1%; }
+table { border-collapse: collapse; width: 100%; margin-top: 1em; }
+th, td { border: 1px solid #ccc; padding: 4px; text-align: left; }
