@@ -5,7 +5,7 @@ import argparse
 import json
 import shutil
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -32,16 +32,41 @@ def discover_replicates(root: Path) -> List[Dict]:
 
 
 def load_colony_data(json_path: Path) -> List[Dict]:
-    with open(json_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return []
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        # try typical keys
-        for key in ["colonies", "data"]:
+        for key in ["colonies", "data", "items"]:
             if key in data and isinstance(data[key], list):
                 return data[key]
     return []
+
+
+def _extract_area(colony: Dict) -> Optional[float]:
+    for key in ("area", ("features", "area"), ("basic_info", "area")):
+        if isinstance(key, tuple):
+            value = colony.get(key[0], {}).get(key[1])
+        else:
+            value = colony.get(key)
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
+
+
+def _extract_polygon(colony: Dict) -> Optional[List[List[float]]]:
+    for key in ("polygon", "contour", "points"):
+        poly = colony.get(key)
+        if (
+            isinstance(poly, list)
+            and poly
+            and all(isinstance(pt, (list, tuple)) and len(pt) >= 2 for pt in poly)
+        ):
+            return [list(map(float, pt[:2])) for pt in poly]
+    return None
 
 
 def collect_images(rep_dir: Path) -> Dict[str, str]:
@@ -84,16 +109,21 @@ def generate_reports(
         colonies = load_colony_data(rep["json_path"])
         headers = sorted({k for col in colonies for k in col.keys()})
         areas = []
+        polygons = []
         for col in colonies:
-            area = col.get("area")
-            if area is None:
-                area = col.get("basic_info", {}).get("area")
-            if isinstance(area, (int, float)):
+            area = _extract_area(col)
+            if area is not None:
                 areas.append(area)
+            polygons.append(_extract_polygon(col))
         imgs = collect_images(rep["dir"])
         rep.update(imgs)
         html = rep_tpl.render(
-            replicate=rep, headers=headers, rows=colonies, areas_json=json.dumps(areas)
+            replicate=rep,
+            headers=headers,
+            rows=colonies,
+            areas_json=json.dumps(areas),
+            colonies_json=json.dumps(colonies),
+            polygons_json=json.dumps(polygons),
         )
         out_path = rep["dir"] / "report.html"
         with open(out_path, "w", encoding="utf-8") as f:
