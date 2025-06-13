@@ -178,13 +178,19 @@ class ColonyDetector:
 
         # 计算图像尺寸用于背景检测
         img_area = img.shape[0] * img.shape[1]
-        max_colony_area = min(
-            self.config.max_colony_area, img_area * 0.1
-        )  # 不超过图像10%
+    
+        # 确保 max_colony_area 是数值类型
+        config_max_area = self.config.max_colony_area
+        if isinstance(config_max_area, dict):
+            config_max_area = float(list(config_max_area.values())[0])
+        else:
+            config_max_area = float(config_max_area)
+
+        max_colony_area = min(config_max_area, img_area * 0.1)
 
         logging.info(f"面积限制: {self.config.min_colony_area} - {max_colony_area}")
 
-        min_area_for_sam = max(50, self.config.min_colony_area // 8)
+        min_area_for_sam = max(50, int(self.config.min_colony_area) // 8)
         masks, scores = self.sam_model.segment_everything(
             img, min_area=min_area_for_sam
         )
@@ -194,63 +200,52 @@ class ColonyDetector:
         colonies = []
         filtered_counts = {
             "too_small": 0,
-            "too_large": 0,  # 🔥 新增统计
-            "background": 0,  # 🔥 新增统计
+            "too_large": 0,
+            "background": 0,
             "valid": 0,
         }
 
         for i, (mask, score) in enumerate(
             tqdm(zip(masks, scores), total=len(masks), desc="Auto detecting colonies")
         ):
-            enhanced_mask = self._enhance_colony_mask(mask, img)
-            # —— 在这里插入可视化调试代码 ——
-            # 如果开启 debug，就把可视化结果存到 ResultManager 的 debug 文件夹
-            if self.debug:
-                # 先把 mask 区域用绿色叠加到 img 上
-                vis = img.copy()
-                vis[enhanced_mask > 0] = [0, 255, 0]  # 绿色标记
-                # 构造文件名
-                filename = f"debug_colony_{i}.png"
-                # 获取 ResultManager 的 debug 目录
-                debug_dir = self.result_manager.directories["debug"]
-                # 最终完整路径
-                save_path = debug_dir / filename
-                # 使用 cv2.imwrite 保存（记得转换回 BGR）
-                cv2.imwrite(str(save_path), cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
+            try:
+                enhanced_mask = self._enhance_colony_mask(mask, img)
+                area = float(np.sum(enhanced_mask))  # 确保是浮点数
 
-            area = np.sum(enhanced_mask)
+                # 安全的类型转换
+                min_area = float(self.config.min_colony_area)
 
-            # 🔥 新增：面积范围检查
-            if area < self.config.min_colony_area:
-                filtered_counts["too_small"] += 1
-                logging.debug(f"掩码 {i} 面积过小: {area}")
-                continue
+                # 面积范围检查
+                if area < min_area:
+                    filtered_counts["too_small"] += 1
+                    logging.debug(f"掩码 {i} 面积过小: {area}")
+                    continue
 
-            if area > max_colony_area:
-                filtered_counts["too_large"] += 1
-                logging.warning(
-                    f"掩码 {i} 面积过大(可能是背景): {area} > {max_colony_area}"
+                if area > max_colony_area:
+                    filtered_counts["too_large"] += 1
+                    logging.warning(f"掩码 {i} 面积过大(可能是背景): {area} > {max_colony_area}")
+                    continue
+
+                # 背景检测
+                if self.config.background_filter and self._is_background_region(enhanced_mask, img):
+                    filtered_counts["background"] += 1
+                    logging.warning(f"掩码 {i} 被识别为背景区域")
+                    continue
+
+                # 提取菌落数据
+                colony_data = self._extract_colony_data(
+                    img, enhanced_mask, f"colony_{i}", "sam_auto"
                 )
+
+                if colony_data:
+                    colony_data["sam_score"] = float(score)
+                    colonies.append(colony_data)
+                    filtered_counts["valid"] += 1
+                    logging.debug(f"✓ 菌落 {i}: 面积={area:.0f}, 分数={score:.3f}")
+
+            except Exception as e:
+                logging.error(f"处理掩码 {i} 时出错: {e}")
                 continue
-
-            # 🔥 新增：背景检测
-            if self.config.background_filter and self._is_background_region(
-                enhanced_mask, img
-            ):
-                filtered_counts["background"] += 1
-                logging.warning(f"掩码 {i} 被识别为背景区域")
-                continue
-
-            # 提取菌落数据
-            colony_data = self._extract_colony_data(
-                img, enhanced_mask, f"colony_{i}", "sam_auto"
-            )
-
-            if colony_data:
-                colony_data["sam_score"] = float(score)
-                colonies.append(colony_data)
-                filtered_counts["valid"] += 1
-                logging.debug(f"✓ 菌落 {i}: 面积={area:.0f}, 分数={score:.3f}")
 
         # 打印过滤统计
         logging.info(
@@ -1214,41 +1209,51 @@ class ColonyDetector:
         }
 
     def _is_background_region(self, mask: np.ndarray, img: np.ndarray) -> bool:
-        """检测是否为背景区域"""
+        """检测是否为背景区域 - 修复版本"""
         try:
-            # 使用配置中的参数
             h, w = mask.shape
-            area = np.sum(mask)
+            area = float(np.sum(mask))
             img_area = h * w
 
-            # 1. 面积检查 (使用 config.max_background_ratio)
-            if area > img_area * self.config.max_background_ratio:
+            # 确保 max_background_ratio 是数值类型
+            max_bg_ratio = self.config.max_background_ratio
+            if isinstance(max_bg_ratio, dict):
+                max_bg_ratio = float(list(max_bg_ratio.values())[0])
+            else:
+                max_bg_ratio = float(max_bg_ratio)
 
-                logging.debug(
-                    f"背景检测: 面积过大 {area/img_area:.3f} > {self.config.max_background_ratio}"
-                )
+            # 1. 面积检查
+            if area > img_area * max_bg_ratio:
+                logging.debug(f"背景检测: 面积过大 {area/img_area:.3f} > {max_bg_ratio}")
                 return True
 
-            # 2. 边缘接触检查 (使用 config.edge_contact_limit)
+            # 2. 边缘接触检查
+            edge_contact_limit = self.config.edge_contact_limit
+            if isinstance(edge_contact_limit, dict):
+                edge_contact_limit = float(list(edge_contact_limit.values())[0])
+            else:
+                edge_contact_limit = float(edge_contact_limit)
+
             edge_pixels = (
-                np.sum(mask[0, :])
-                + np.sum(mask[-1, :])
-                + np.sum(mask[:, 0])
-                + np.sum(mask[:, -1])
+                np.sum(mask[0, :]) + np.sum(mask[-1, :]) +
+                np.sum(mask[:, 0]) + np.sum(mask[:, -1])
             )
             edge_ratio = edge_pixels / area if area > 0 else 0
 
-            if edge_ratio > self.config.edge_contact_limit:
-
-                logging.debug(
-                    f"背景检测: 边缘接触过多 {edge_ratio:.3f} > {self.config.edge_contact_limit}"
-                )
+            if edge_ratio > edge_contact_limit:
+                logging.debug(f"背景检测: 边缘接触过多 {edge_ratio:.3f} > {edge_contact_limit}")
                 return True
 
             # 3. 形状规整度检查（可选）
             if hasattr(self.config, "shape_regularity_min"):
+                shape_reg_min = self.config.shape_regularity_min
+                if isinstance(shape_reg_min, dict):
+                    shape_reg_min = float(list(shape_reg_min.values())[0])
+                else:
+                    shape_reg_min = float(shape_reg_min)
+
                 regularity = self._calculate_shape_regularity(mask)
-                if regularity < self.config.shape_regularity_min:
+                if regularity < shape_reg_min:
                     logging.debug(f"背景检测: 形状过于不规则 {regularity:.3f}")
                     return True
 

@@ -57,6 +57,82 @@ def filter_sam_masks(masks: List[np.ndarray], scores: List[float], det_conf) -> 
         filtered.append(mask)
     return filtered
 
+def validate_detection_config(config):
+    """验证检测配置的数据类型"""
+    try:
+        # 检查并修复数值类型
+        numeric_fields = [
+            'min_colony_area', 'max_colony_area', 'expand_pixels',
+            'adaptive_gradient_thresh', 'adaptive_expand_iters',
+            'overlap_threshold', 'max_background_ratio', 'edge_contact_limit',
+            'edge_margin_pixels', 'high_quality_threshold', 'supplementary_threshold',
+            'shape_regularity_min', 'duplicate_centroid_threshold',
+            'duplicate_overlap_threshold', 'edge_margin_ratio',
+            'cross_boundary_overlap_threshold', 'min_roundness',
+            'max_aspect_ratio', 'max_gray_std', 'growth_inhibited_ratio',
+            'solidity_threshold'
+        ]
+        
+        for field in numeric_fields:
+            if hasattr(config, field):
+                value = getattr(config, field)
+                if not isinstance(value, (int, float, np.integer, np.floating)):
+                    logging.warning(f"配置字段 {field} 类型错误: {type(value)}, 值: {value}")
+                    # 尝试转换
+                    try:
+                        if isinstance(value, dict):
+                            # 如果是字典，尝试获取第一个值
+                            val = list(value.values())[0] if value else 0
+                            setattr(config, field, float(val))
+                        else:
+                            setattr(config, field, float(value))
+                    except:
+                        # 设置默认值
+                        default_values = {
+                            'min_colony_area': 800,
+                            'max_colony_area': 50000,
+                            'expand_pixels': 2,
+                            'adaptive_gradient_thresh': 20,
+                            'adaptive_expand_iters': 25,
+                            'overlap_threshold': 0.4,
+                            'max_background_ratio': 0.2,
+                            'edge_contact_limit': 0.5,
+                            'edge_margin_pixels': 20,
+                            'high_quality_threshold': 0.85,
+                            'supplementary_threshold': 0.5,
+                            'shape_regularity_min': 0.15,
+                            'duplicate_centroid_threshold': 15.0,
+                            'duplicate_overlap_threshold': 0.5,
+                            'edge_margin_ratio': 0.08,
+                            'cross_boundary_overlap_threshold': 0.1,
+                            'min_roundness': 0.3,
+                            'max_aspect_ratio': 3.0,
+                            'max_gray_std': 100.0,
+                            'growth_inhibited_ratio': 0.30,
+                            'solidity_threshold': 0.70
+                        }
+                        setattr(config, field, default_values.get(field, 0))
+        
+        # 检查布尔类型
+        bool_fields = [
+            'merge_overlapping', 'use_preprocessing', 'background_filter',
+            'enable_edge_artifact_filter', 'enable_multi_stage',
+            'enable_duplicate_merging', 'enable_adaptive_grid',
+            'sort_by_quality', 'mark_cross_boundary'
+        ]
+        for field in bool_fields:
+            if hasattr(config, field):
+                value = getattr(config, field)
+                if not isinstance(value, bool):
+                    setattr(config, field, bool(value))
+                    
+    except Exception as e:
+        logging.error(f"配置验证失败: {e}")
+
+
+
+
+
 class AnalysisPipeline:
     """分析管道 - 协调整个分析流程"""
 
@@ -649,15 +725,27 @@ class AnalysisPipeline:
             return []
     
         try:
+            # 在调用检测前，先验证配置
+            self._validate_detection_params()
             # 直接使用现有的ColonyDetector，不要重新实现
             colonies = self.detector.detect(img_rgb, mode=self.args.mode)
             logging.info(f"检测完成，发现 {len(colonies)} 个菌落")
-            return colonies
+            
+            # 验证返回的数据
+            valid_colonies = []
+            for i, colony in enumerate(colonies):
+                if self._validate_colony_data(colony):
+                    valid_colonies.append(colony)
+                else:
+                    logging.warning(f"菌落 {i} 数据无效，已跳过")
+        
+            return valid_colonies
+            
         
         except Exception as e:
             logging.error(f"检测失败: {e}")
             import traceback
-            logging.debug(traceback.format_exc())
+            logging.error(traceback.format_exc())
         
             # 尝试使用简化的fallback方案
             try:
@@ -666,6 +754,47 @@ class AnalysisPipeline:
             except Exception as e2:
                 logging.error(f"Fallback检测也失败: {e2}")
                 return []
+
+    def _validate_detection_params(self):
+        """验证检测参数类型"""
+        try:
+            # 检查关键参数
+            params_to_check = [
+                ('min_colony_area', self.config.detection.min_colony_area),
+                ('max_colony_area', self.config.detection.max_colony_area),
+                ('max_background_ratio', self.config.detection.max_background_ratio),
+                ('edge_contact_limit', self.config.detection.edge_contact_limit),
+            ]
+        
+            for param_name, param_value in params_to_check:
+                if isinstance(param_value, dict):
+                    logging.error(f"参数 {param_name} 是字典类型: {param_value}")
+                    raise TypeError(f"配置参数 {param_name} 应该是数值，但得到了字典")
+                elif not isinstance(param_value, (int, float, np.integer, np.floating)):
+                    logging.error(f"参数 {param_name} 类型错误: {type(param_value)}")
+                    raise TypeError(f"配置参数 {param_name} 类型错误")
+                
+        except Exception as e:
+            logging.error(f"参数验证失败: {e}")
+            raise
+
+
+    def _validate_colony_data(self, colony):
+        """验证单个菌落数据的完整性"""
+        required_fields = ['id', 'area', 'bbox', 'mask']
+    
+        for field in required_fields:
+            if field not in colony:
+                logging.warning(f"菌落数据缺少字段: {field}")
+                return False
+            
+        # 验证数值字段
+        if not isinstance(colony.get('area'), (int, float, np.integer, np.floating)):
+            logging.warning(f"菌落面积类型错误: {type(colony.get('area'))}")
+            return False
+        
+        return True
+
     def _detect_colonies_simple_fallback(self, img_rgb):
         """简化的fallback检测方案"""
         try:
@@ -699,45 +828,6 @@ class AnalysisPipeline:
         except Exception as e:
             logging.error(f"简化fallback检测失败: {e}")
             return []
-
-    def validate_detection_config(config):
-        """验证检测配置的数据类型"""
-        try:
-            # 检查并修复数值类型
-            numeric_fields = [
-                'min_colony_area', 'max_colony_area', 'expand_pixels',
-                'adaptive_gradient_thresh', 'adaptive_expand_iters',
-                'overlap_threshold', 'max_background_ratio', 'edge_contact_limit'
-            ]
-        
-            for field in numeric_fields:
-                if hasattr(config, field):
-                    value = getattr(config, field)
-                    if not isinstance(value, (int, float, np.integer, np.floating)):
-                        logging.warning(f"配置字段 {field} 类型错误: {type(value)}")
-                        # 设置默认值
-                        default_values = {
-                            'min_colony_area': 800,
-                            'max_colony_area': 50000,
-                            'expand_pixels': 2,
-                            'adaptive_gradient_thresh': 20,
-                            'adaptive_expand_iters': 25,
-                            'overlap_threshold': 0.4,
-                            'max_background_ratio': 0.2,
-                            'edge_contact_limit': 0.5
-                        }
-                        setattr(config, field, default_values.get(field, 0))
-        
-            # 检查布尔类型
-            bool_fields = ['merge_overlapping', 'use_preprocessing', 'background_filter']
-            for field in bool_fields:
-                if hasattr(config, field):
-                    value = getattr(config, field)
-                    if not isinstance(value, bool):
-                        setattr(config, field, bool(value))
-                    
-        except Exception as e:
-            logging.error(f"配置验证失败: {e}")
 
 
     def _analyze_colonies(self, colonies):
@@ -817,6 +907,9 @@ class AnalysisPipeline:
             
         except Exception as e:
             logging.error(f"保存调试信息失败: {e}")
+
+
+
 
 
 
