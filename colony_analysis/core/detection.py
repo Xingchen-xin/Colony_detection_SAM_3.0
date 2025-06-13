@@ -260,8 +260,29 @@ class ColonyDetector:
     def _detect_hybrid_mode(self, img: np.ndarray) -> List[Dict]:
         """改进的混合检测模式 - 集成增强功能"""
         logging.info("使用改进的混合检测模式...")
+        # Step 1: 网格模式检测已有菌落
+        grid_colonies = self._detect_grid_mode(img)
+        occupied_wells = {c.get('well_position') for c in grid_colonies}
+        logging.info(f"网格模式检测到 {len(grid_colonies)} 个菌落")
 
+        # Step 2: auto模式检测，并只填充那些还没被网格占据的孔位
+        auto_colonies = self._detect_auto_mode(img)
+        logging.info(f"Auto模式检测到 {len(auto_colonies)} 个菌落")
+
+        for colony in auto_colonies:
+            # 计算最近的孔位（需要你已有或实现 _find_nearest_well 方法）
+            well_pos = self._find_nearest_well(colony)
+            if well_pos not in occupied_wells:
+                colony['well_position'] = well_pos
+                grid_colonies.append(colony)
+                occupied_wells.add(well_pos)
+
+        logging.info(f"混合模式最终检测到 {len(grid_colonies)} 个菌落")
+        return grid_colonies
+
+    def _detect_hybrid_mode_original(self, img: np.ndarray) -> List[Dict]:
         # Step 1: 使用auto模式精确检测菌落
+        logging.info("使用改进的混合检测模式...")
         auto_colonies = self._detect_auto_mode_refined(img)
         logging.info(f"Auto检测到 {len(auto_colonies)} 个菌落")
 

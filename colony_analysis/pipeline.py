@@ -466,14 +466,17 @@ class AnalysisPipeline:
                     min_well = well_id
             if min_well is not None:
                 well_to_candidates[min_well].append(c)
-        # —— 筛选：每个孔位只保留得分最高的候选菌落 —— 
+        # 修改：不要简单覆盖，而是合并候选        
         for well_id, candlist in well_to_candidates.items():
             if candlist:
-                best = max(
-                    candlist,
-                    key=lambda c: c.get('scores', {}).get('overall_score', c.get('area', 0))
-                )
-                well_to_candidates[well_id] = [best]
+                # 保留所有候选，但标记主要和次要
+                candlist.sort(key=lambda c: c.get('sam_score', 0), reverse=True)
+                for i, colony in enumerate(candlist):
+                    colony['is_primary'] = (i == 0)
+                    colony['candidate_rank'] = i + 1
+                # 或者：如果检测到多个，记录警告
+                if len(candlist) > 1:
+                    logging.warning(f"孔位 {well_id} 检测到 {len(candlist)} 个候选菌落")
 
         # 3. 统计所有已检测菌落的半径
         detected_colonies = []

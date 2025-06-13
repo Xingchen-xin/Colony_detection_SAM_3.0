@@ -90,3 +90,4 @@ medium_params:
       detection:
         background_filter: false
         adaptive_gradient_thresh: 15
+        duplicate_overlap_threshold: 0.7  # 更严格的重复判定
