@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>{{ replicate.name }}</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <h1>{{ replicate.name }}</h1>
+  <div>
+    {% if replicate.front_img %}<img src="{{ replicate.front_img }}" class="colony-img">{% endif %}
+    {% if replicate.back_img %}<img src="{{ replicate.back_img }}" class="colony-img">{% endif %}
+  </div>
+  <h2>Colonies</h2>
+  <table>
+    <thead><tr>{% for h in headers %}<th>{{ h }}</th>{% endfor %}</tr></thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>{% for h in headers %}<td>{{ row.get(h, '') }}</td>{% endfor %}</tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <h2>Area Distribution</h2>
+  <canvas id="areaChart" width="600" height="300"></canvas>
+  <script>
+    const data = {{ areas_json|safe }};
+    const labels = data.map((_,i)=>i+1);
+    new Chart(document.getElementById('areaChart'), {
+      type: 'bar',
+      data: {labels: labels, datasets: [{label: 'Area', data: data}]},
+      options: {scales: {x: {title:{display:true,text:'Colony'}}, y:{title:{display:true,text:'Area'}}}}
+    });
+  </script>
+</body>
+</html>

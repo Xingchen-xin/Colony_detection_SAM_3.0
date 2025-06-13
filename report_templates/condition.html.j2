@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>{{ condition }}</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <h1>{{ condition }}</h1>
+  <h2>Replicates</h2>
+  <ul>
+    {% for rep in replicates %}
+    <li><a href="../{{ rep.page }}">{{ rep.name }}</a> ({{ rep.stats.count }} colonies)</li>
+    {% endfor %}
+  </ul>
+  <h2>Average Colony Area</h2>
+  <canvas id="areaChart" width="600" height="300"></canvas>
+  <script>
+    const labels = {{ labels_json|safe }};
+    const data = {{ avg_areas_json|safe }};
+    new Chart(document.getElementById('areaChart'), {
+      type: 'bar',
+      data: { labels: labels, datasets: [{label:'Avg area', data:data}] },
+      options: { scales: {y:{title:{display:true,text:'Area'}}} }
+    });
+  </script>
+</body>
+</html>
