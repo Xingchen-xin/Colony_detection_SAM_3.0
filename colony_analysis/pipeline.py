@@ -7,6 +7,7 @@ import os
 import time
 from pathlib import Path
 from typing import Dict, List, Tuple
+import json
 
 from tqdm import tqdm
 
@@ -140,7 +141,6 @@ class AnalysisPipeline:
         """初始化分析管道"""
         if not hasattr(args, "device"):
             args.device = "cuda"
-        self.args = args
         self.args = args
         self.cfg = getattr(args, 'cfg', {})
         self.start_time = None
