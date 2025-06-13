@@ -8,10 +8,19 @@
 </head>
 <body>
   <h1>{{ replicate.name }}</h1>
-  <div>
-    {% if replicate.front_img %}<img src="{{ replicate.front_img }}" class="colony-img">{% endif %}
-    {% if replicate.back_img %}<img src="{{ replicate.back_img }}" class="colony-img">{% endif %}
+  <label><input type="checkbox" id="maskToggle"> 显示掩膜</label>
+  {% if replicate.front_img %}
+  <div class="img-wrapper">
+    <img id="frontImg" src="{{ replicate.front_img }}" class="colony-img">
+    <svg id="maskLayer" class="overlay"></svg>
   </div>
+  {% endif %}
+  {% if replicate.back_img %}
+  <div class="img-wrapper">
+    <img id="backImg" src="{{ replicate.back_img }}" class="colony-img">
+  </div>
+  {% endif %}
+  <div id="tooltip" class="tooltip"></div>
   <h2>Colonies</h2>
   <table>
     <thead><tr>{% for h in headers %}<th>{{ h }}</th>{% endfor %}</tr></thead>
@@ -31,6 +40,51 @@
       data: {labels: labels, datasets: [{label: 'Area', data: data}]},
       options: {scales: {x: {title:{display:true,text:'Colony'}}, y:{title:{display:true,text:'Area'}}}}
     });
+
+    const colonies = {{ colonies_json|safe }};
+    const polygons = {{ polygons_json|safe }};
+    const svg = document.getElementById('maskLayer');
+    const toggle = document.getElementById('maskToggle');
+    const tooltip = document.getElementById('tooltip');
+
+    function showTooltip(index, evt) {
+      const c = colonies[index] || {};
+      let html = '';
+      for (const k in c) {
+        if (typeof c[k] === 'object') {
+          html += `<div><strong>${k}</strong>: ${JSON.stringify(c[k])}</div>`;
+        } else {
+          html += `<div><strong>${k}</strong>: ${c[k]}</div>`;
+        }
+      }
+      tooltip.innerHTML = html;
+      tooltip.style.display = 'block';
+      tooltip.style.left = evt.pageX + 10 + 'px';
+      tooltip.style.top = evt.pageY + 10 + 'px';
+    }
+
+    function hideTooltip() {
+      tooltip.style.display = 'none';
+    }
+
+    function createPolygons() {
+      polygons.forEach((poly, idx) => {
+        if (!poly) return;
+        const p = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+        p.setAttribute('points', poly.map(pt => pt.join(',')).join(' '));
+        p.classList.add('mask-poly');
+        p.addEventListener('mousemove', evt => showTooltip(idx, evt));
+        p.addEventListener('mouseleave', hideTooltip);
+        svg.appendChild(p);
+      });
+    }
+
+    toggle.addEventListener('change', () => {
+      svg.style.display = toggle.checked ? 'block' : 'none';
+    });
+
+    createPolygons();
+    svg.style.display = 'none';
   </script>
 </body>
 </html>
