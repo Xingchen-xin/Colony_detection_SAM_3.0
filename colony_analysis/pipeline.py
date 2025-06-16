@@ -385,19 +385,21 @@ class AnalysisPipeline:
 
     def _force_96plate_detection(self, img_rgb):
         """
-        强制96孔板检测：对每个预设孔位区域内查找候选菌落，输出96个条目（无菌落填推测/补全信息）
-        新增支持推测未生长菌落的可视化与数据补全。
+        强制96孔板检测：对每个预设孔位区域内查找候选菌落
+        修复版本：正确处理检测到的菌落，只对真正空的孔位进行推测
         """
         import numpy as np
         from copy import deepcopy
         import cv2
         from PIL import Image, ImageDraw, ImageFont
 
-        # 获取plate_grid: {well_id: {center, search_radius, ...}}
+        # 获取plate_grid
         plate_grid = self.config.plate_grid
         
-        # —— 1) Back 侧颜色提示分割 —— 
+        # 1) 首先执行正常的检测流程
         colonies = []
+        
+        # Back orientation的特殊处理
         if getattr(self.args, "orientation", "").lower() == "back":
             logging.info("Back orientation: applying color-based SAM prompts")
             hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV)
@@ -423,13 +425,15 @@ class AnalysisPipeline:
                             colonies.append(data)
                     except Exception:
                         continue
-                logging.info(f"Color prompts yielded {len(colonies)} candidates")
-
-        # —— 2) Hybrid 模式：先在每个格子里跑 SAM，再全图 auto 补充 —— 
-        rows = getattr(self.args, "rows", 8)
-        cols = getattr(self.args, "cols", 12)
+            logging.info(f"Color prompts yielded {len(colonies)} candidates")
+        
+        # 2) 执行混合模式检测
         if self.args.mode == "hybrid" and self.args.well_plate:
-            logging.info("Hybrid mode: grid-based SAM segmentation first")
+            logging.info("Hybrid mode: grid-based SAM segmentation")
+            
+            # 网格检测
+            rows = getattr(self.args, "rows", 8)
+            cols = getattr(self.args, "cols", 12)
             masks, labels = self.detector.segment_grid(
                 img_rgb,
                 rows=rows,
@@ -437,220 +441,203 @@ class AnalysisPipeline:
                 padding=self.config.detection.edge_margin_ratio
             )
             
-            # 统计网格检测结果
-            grid_cols = []
-            empty_wells = []
+            # 处理网格检测结果
             for mask, lab in zip(masks, labels):
-                if mask.sum() > self.config.detection.min_colony_area:
+                if mask is not None and np.sum(mask) > self.config.detection.min_colony_area:
                     c = self.detector._extract_colony_data(
                         img_rgb, mask, f"grid_{lab}", "grid"
                     )
                     if c:
                         c["well_position"] = lab
-                        grid_cols.append(c)
-                else:
-                    empty_wells.append(lab)
-                    
-            logging.info(f"Grid segmentation found {len(grid_cols)} colonies in {96-len(empty_wells)} wells")
-            logging.info(f"Empty wells from grid: {', '.join(empty_wells[:10])}{'...' if len(empty_wells) > 10 else ''}")
+                        colonies.append(c)
+            
+            logging.info(f"Grid segmentation added {len(colonies)} colonies")
             
             # Auto检测补充
-            logging.info("Now running auto-detect to find additional colonies")
+            logging.info("Running auto-detect for additional colonies")
             auto_cols = self.detector.detect(img_rgb, mode="auto")
             logging.info(f"Auto mode found {len(auto_cols)} colonies")
             
-            # 合并结果（避免简单拼接）
-            colonies.extend(grid_cols)
-            
-            # 将auto检测的菌落智能分配
+            # 智能合并auto检测结果
             for auto_col in auto_cols:
-                # 检查是否已经有grid检测结果占据了相近位置
                 auto_centroid = auto_col.get('centroid', (0, 0))
                 too_close = False
                 
-                for grid_col in grid_cols:
-                    grid_centroid = grid_col.get('centroid', (0, 0))
-                    distance = np.sqrt((auto_centroid[0] - grid_centroid[0])**2 + 
-                                    (auto_centroid[1] - grid_centroid[1])**2)
-                    if distance < 50:  # 如果距离太近，认为是重复
+                # 检查是否与已有菌落重复
+                for existing_col in colonies:
+                    existing_centroid = existing_col.get('centroid', (0, 0))
+                    distance = np.sqrt(
+                        (auto_centroid[0] - existing_centroid[0])**2 + 
+                        (auto_centroid[1] - existing_centroid[1])**2
+                    )
+                    if distance < 50:  # 距离阈值
                         too_close = True
                         break
                 
                 if not too_close:
                     colonies.append(auto_col)
-                    logging.debug(f"Added auto colony at {auto_centroid}")
         else:
-            # 其他模式或非孔板，直接调用
+            # 其他模式直接检测
             colonies.extend(self.detector.detect(img_rgb, mode=self.args.mode))
-
-        # 2. 分配菌落到最近well_id
-        well_to_candidates = {well: [] for well in plate_grid}
-        for c in colonies:
-            centroid = c.get("centroid", None)
+        
+        # 3) 将菌落分配到孔位
+        well_to_colony = {}  # 每个孔位只保留最佳菌落
+        unmapped_colonies = []
+        
+        for colony in colonies:
+            centroid = colony.get("centroid", None)
             if centroid is None:
+                unmapped_colonies.append(colony)
                 continue
+                
             cy, cx = centroid
-            # 找到最近的well
             min_dist = float("inf")
             min_well = None
+            
+            # 找到最近的孔位
             for well_id, info in plate_grid.items():
                 wy, wx = info["center"]
-                wr = info.get("search_radius", 20)
+                wr = info.get("search_radius", 50)
                 d = np.hypot(cx - wx, cy - wy)
-                if d < min_dist and d < wr * 1.5:  # 允许一定范围
+                
+                if d < min_dist and d < wr * 1.5:
                     min_dist = d
                     min_well = well_id
+            
             if min_well is not None:
-                well_to_candidates[min_well].append(c)
-                logging.debug(f"Colony {c.get('id')} assigned to well {min_well} (distance: {min_dist:.1f})")
-
-        # 修改：不要简单覆盖，而是合并候选        
-        for well_id, candlist in well_to_candidates.items():
-            if candlist:
-                # 保留所有候选，但标记主要和次要
-                candlist.sort(key=lambda c: c.get('sam_score', 0), reverse=True)
-                for i, colony in enumerate(candlist):
-                    colony['is_primary'] = (i == 0)
-                    colony['candidate_rank'] = i + 1
-                # 或者：如果检测到多个，记录警告
-                if len(candlist) > 1:
-                    logging.warning(f"孔位 {well_id} 检测到 {len(candlist)} 个候选菌落")
-
-        # 3. 统计所有已检测菌落的半径
-        detected_colonies = []
-        for candlist in well_to_candidates.values():
-            detected_colonies.extend(candlist)
-        # 取所有菌落的半径
-        radii = []
-        for c in detected_colonies:
-            if "radius" in c:
-                radii.append(c["radius"])
-            elif "mask" in c:
-                # 估算半径
-                area = np.sum(c["mask"] > 0)
-                radii.append(np.sqrt(area / np.pi))
-        median_radius = np.median(radii) if radii else 25  # default_radius
+                # 如果该孔位已有菌落，比较质量
+                if min_well in well_to_colony:
+                    existing = well_to_colony[min_well]
+                    existing_score = existing.get('sam_score', 0) * existing.get('area', 0)
+                    new_score = colony.get('sam_score', 0) * colony.get('area', 0)
+                    
+                    if new_score > existing_score:
+                        unmapped_colonies.append(existing)  # 旧的变成未映射
+                        well_to_colony[min_well] = colony
+                    else:
+                        unmapped_colonies.append(colony)  # 新的变成未映射
+                else:
+                    well_to_colony[min_well] = colony
+                    colony["well_position"] = min_well
+            else:
+                unmapped_colonies.append(colony)
         
-        # 4. 遍历每个孔位，输出菌落或推测未生长
+        # 4) 统计检测情况
+        detected_wells = set(well_to_colony.keys())
+        empty_wells = set(plate_grid.keys()) - detected_wells
+        
+        logging.info(f"检测到菌落的孔位: {len(detected_wells)}/96")
+        logging.info(f"空孔位: {len(empty_wells)}")
+        
+        # 5) 构建最终结果
         forced_colonies = []
+        
+        # 添加检测到的菌落
+        for well_id, colony in well_to_colony.items():
+            colony = deepcopy(colony)
+            colony["well_position"] = well_id
+            colony["forced_96plate"] = True
+            colony["colony_status"] = "detected"
+            colony["growth_status"] = "normal"
+            forced_colonies.append(colony)
+        
+        # 添加未映射的菌落（如果有）
+        for i, colony in enumerate(unmapped_colonies[:10]):  # 最多保留10个未映射
+            colony = deepcopy(colony)
+            colony["well_position"] = f"unmapped_{i}"
+            colony["forced_96plate"] = True
+            colony["colony_status"] = "detected"
+            forced_colonies.append(colony)
+        
+        # 处理空孔位
         fallback_policy = getattr(self.args, "fallback_null_policy", "fill")
         
-        # 用于可视化的输出图像副本
-        vis_img = img_rgb.copy()
-        # 用于PIL标注
-        pil_img = Image.fromarray(vis_img)
-        draw = ImageDraw.Draw(pil_img)
-        # 尝试加载字体
-        try:
-            font = ImageFont.truetype("DejaVuSans.ttf", 18)
-        except Exception:
-            font = None
+        if fallback_policy != "skip" and len(empty_wells) > 0:
+            # 计算已检测菌落的平均半径
+            radii = []
+            for colony in well_to_colony.values():
+                if "mask" in colony:
+                    area = np.sum(colony["mask"] > 0)
+                    radii.append(np.sqrt(area / np.pi))
+            median_radius = np.median(radii) if radii else 25
             
-        # 统计信息
-        detected_wells = []
-        inferred_wells = []
-        
-        for well_id in sorted(plate_grid.keys()):
-            candidates = well_to_candidates[well_id]
-            info = plate_grid[well_id]
-            wy, wx = info["center"]
-            wx, wy = int(wx), int(wy)
-            est_radius = int(median_radius)
-            est_area = float(np.pi * (est_radius ** 2))
+            # 用于可视化
+            vis_img = img_rgb.copy()
+            pil_img = Image.fromarray(vis_img)
+            draw = ImageDraw.Draw(pil_img)
             
-            if candidates:
-                # 按分数或面积排序，选取最佳
-                best = max(candidates, key=lambda cc: cc.get("scores", {}).get("overall_score", 0) if "scores" in cc else cc.get("area", 0))
-                best = deepcopy(best)
-                best["well_position"] = well_id
-                best["forced_96plate"] = True
-                # 标记状态
-                best["colony_status"] = "detected"
-                best["growth_status"] = "normal"
-                forced_colonies.append(best)
-                detected_wells.append(well_id)
-            else:
-                if fallback_policy == "skip":
-                    continue
-                # 提取局部区域特征
-                # 提取一个圆区域的mask
+            try:
+                font = ImageFont.truetype("DejaVuSans.ttf", 18)
+            except:
+                font = None
+            
+            # 对空孔位生成推测条目
+            for well_id in sorted(empty_wells):
+                info = plate_grid[well_id]
+                wy, wx = info["center"]
+                wx, wy = int(wx), int(wy)
+                est_radius = int(median_radius)
+                est_area = float(np.pi * (est_radius ** 2))
+                
+                # 提取局部特征
                 mask = np.zeros(img_rgb.shape[:2], dtype=np.uint8)
                 cv2.circle(mask, (wx, wy), est_radius, 1, thickness=-1)
-                # 提取局部灰度均值
                 local_pixels = img_rgb[mask > 0]
-                if len(local_pixels.shape) == 3 and local_pixels.shape[1] == 3:
-                    # 转灰度
-                    local_gray = np.mean(local_pixels, axis=1)
+                
+                if len(local_pixels) > 0:
+                    local_gray = np.mean(local_pixels, axis=1) if len(local_pixels.shape) > 1 else local_pixels
+                    local_mean = float(np.mean(local_gray))
                 else:
-                    local_gray = local_pixels
-                local_mean = float(np.mean(local_gray)) if local_gray.size > 0 else 0.0
-                # dot_count: 统计区域内亮点数（可自定义，此处用亮度高于阈值的像素数/100）
-                dot_count = int(np.sum(local_gray > 180) // 100)
-                # 判断是否为non-growing
-                area_thresh = est_area * 0.3
-                intensity_thresh = 120
-                growth_status = "non-growing" if (est_area < area_thresh or local_mean < intensity_thresh) else "normal"
-                # 构造推测菌落条目
+                    local_mean = 0.0
+                
+                # 创建推测菌落
                 inferred_colony = {
-                    "id": f"colony_{well_id}",
-                    "well_id": well_id,
+                    "id": f"inferred_{well_id}",
                     "well_position": well_id,
-                    "center": (wx, wy),
-                    "centroid": (wy, wx),  # 添加centroid以保持兼容性
-                    "radius": est_radius,
+                    "centroid": (wy, wx),
+                    "bbox": (wy-est_radius, wx-est_radius, wy+est_radius, wx+est_radius),
                     "area": est_area,
-                    "intensity_mean": local_mean,
-                    "dot_count": dot_count,
                     "colony_status": "inferred",
-                    "growth_status": growth_status,
+                    "growth_status": "non-growing" if est_area < 1000 else "possible",
                     "forced_96plate": True,
                     "is_null": True,
                     "features": {
                         "area": est_area,
                         "intensity_mean": local_mean,
-                        "radius": est_radius,
-                        "dot_count": dot_count,
                     },
                     "scores": {},
                     "phenotype": {},
+                    # 添加空的图像和掩码以避免分析时的警告
+                    "img": np.zeros((est_radius*2, est_radius*2, 3), dtype=np.uint8),
+                    "mask": np.zeros((est_radius*2, est_radius*2), dtype=bool),
                 }
-                forced_colonies.append(inferred_colony)
-                inferred_wells.append(well_id)
                 
-                # --- 可视化: 灰色虚线圆, 标记"推测未生长" ---
-                circle_color = (160, 160, 160, 180)  # 灰色
-                thickness = 2
-                # 绘制虚线圆
-                dash_len = 6
-                for angle in range(0, 360, dash_len * 2):
-                    start_angle = angle
-                    end_angle = angle + dash_len
-                    draw.arc([wx - est_radius, wy - est_radius, wx + est_radius, wy + est_radius],
-                            start=start_angle, end=end_angle, fill=circle_color, width=thickness)
-                # 标注文字
-                label = "推测未生长" if growth_status == "non-growing" else "推测"
-                text_color = (220, 0, 0) if growth_status == "non-growing" else (80, 80, 80)
-                text_xy = (wx + est_radius + 2, wy - 12)
-                if font:
-                    draw.text(text_xy, label, fill=text_color, font=font)
-                else:
-                    draw.text(text_xy, label, fill=text_color)
+                forced_colonies.append(inferred_colony)
+                
+                # 可视化推测的孔位
+                if self.args.debug:
+                    circle_color = (160, 160, 160, 180)
+                    draw.ellipse([wx-est_radius, wy-est_radius, wx+est_radius, wy+est_radius], 
+                            outline=circle_color, width=2)
+                    if font:
+                        draw.text((wx-20, wy-40), "推测", fill=(80, 80, 80), font=font)
+            
+            # 保存推测可视化
+            if self.args.debug and empty_wells:
+                debug_dir = self.result_manager.directories.get("debug", None)
+                if debug_dir:
+                    vis_save_path = debug_dir / "force96_visualization.png"
+                    try:
+                        pil_img.save(vis_save_path)
+                        logging.info(f"保存96孔板可视化到: {vis_save_path}")
+                    except Exception as e:
+                        logging.error(f"保存可视化失败: {e}")
         
-        # 打印统计信息
-        logging.info(f"强制96孔板检测完成: 检测到 {len(detected_wells)} 个菌落, 推测 {len(inferred_wells)} 个空孔位")
+        logging.info(f"强制96孔板检测完成: 检测到 {len(detected_wells)} 个菌落, "
+                    f"推测 {len(empty_wells)} 个空孔位, "
+                    f"共输出 {len(forced_colonies)} 条记录")
         
-        # 保存可视化到debug目录
-        if self.args.debug:
-            debug_dir = self.result_manager.directories.get("debug", None)
-            if debug_dir:
-                vis_save_path = os.path.join(debug_dir, "force96_inferred.png")
-                try:
-                    pil_img.save(vis_save_path)
-                    logging.info(f"保存推测可视化到: {vis_save_path}")
-                except Exception as e:
-                    logging.error(f"保存推测可视化失败: {e}")
-        
-        return forced_colonies  # 保持原有返回格式
+        return forced_colonies
 
     def _find_nearest_well(self, colony: Dict, plate_grid: Dict[str, Dict]) -> Optional[str]:
         """找到菌落最近的孔位"""
