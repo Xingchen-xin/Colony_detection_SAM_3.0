@@ -64,6 +64,13 @@ def parse_arguments():
   python main.py -i image.jpg -o results/                    # 基本分析
   python main.py -i image.jpg -o results/ --advanced --debug # 高级分析
   python main.py -i plate.jpg --well-plate --mode grid       # 96孔板模式
+
+  批处理模式:
+    python main.py -I Image_input -o results/              # 处理整个目录
+    python main.py -I Image_input -o results/ --filter-medium MM --filter-side back  # 只处理特定条件
+    
+  单图像模式:
+    python main.py -i image.jpg -o results/ --medium MM --side back
         """,
     )
 
@@ -77,6 +84,15 @@ def parse_arguments():
     parser.add_argument(
         "--interactive", action="store_true", help="在批处理模式下与用户交互确认"
     )
+
+    # 批处理模式的过滤选项
+    parser.add_argument("--filter-medium", choices=["r5", "mm", "mmm", "all"], default="all",
+                       help="批处理时只处理特定培养基 (默认: all)")
+    parser.add_argument("--filter-side", choices=["front", "back", "all"], default="all", 
+                       help="批处理时只处理特定拍摄面 (默认: all)")
+    parser.add_argument("--filter-sample", help="批处理时只处理包含特定字符串的样本名")
+    
+    
 
     # 检测参数
     parser.add_argument(
@@ -102,6 +118,14 @@ def parse_arguments():
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="输出详细日志信息")
 
+    parser.add_argument(
+        "--log-level", 
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="INFO",
+        help="日志级别"
+    )
+
+
     # 孔板参数
     parser.add_argument("--well-plate", action="store_true", help="使用96孔板编号系统")
     parser.add_argument("--rows", type=int, default=8, help="孔板行数 (默认: 8)")
@@ -117,13 +141,17 @@ def parse_arguments():
     parser.add_argument(
         "--min-area", type=int, default=2000, help="最小菌落面积 (默认: 2000)"
     )
-    parser.add_argument("--medium", required=True, help="培养基名称")
-    parser.add_argument("--side", required=True, choices=["front", "back"], help="图像正面或背面")
+    parser.add_argument("--medium", help="培养基名称 (单图像模式必需)")
+    parser.add_argument("--side", choices=["front", "back"], help="图像正面或背面 (单图像模式必需)")
     parser.add_argument("--device", choices=["cpu","cuda"], default="cuda", help="运行设备")
-    return parser.parse_args()
+    args = parser.parse_args()
+    # Require medium and side only in single-image mode
+    if args.image and (args.medium is None or args.side is None):
+        parser.error("--medium and --side are required when using --image")
+    return args
 
 
-def setup_logging(verbose: bool = False) -> None:
+def setup_logging(verbose: bool = False, log_level: str = "INFO") -> None:
     """配置日志系统并与 ``tqdm`` 进度条兼容"""
 
     class TqdmHandler(logging.StreamHandler):
@@ -137,7 +165,7 @@ def setup_logging(verbose: bool = False) -> None:
             except Exception:
                 self.handleError(record)
 
-    level = logging.DEBUG if verbose else logging.INFO
+    level = getattr(logging, log_level.upper(), logging.INFO)
     fmt = "%(asctime)s - %(levelname)s - %(message)s"
 
     root = logging.getLogger()
@@ -175,76 +203,160 @@ def main():
         # 显示启动信息
         print_startup_banner()
 
-        images = []
+        # ========== 批处理模式 ==========
         if args.input_dir:
+            print(f"\n📁 批处理模式")
+            print(f"   输入目录: {args.input_dir}")
+            print(f"   输出目录: {args.output}")
+            
+            # 收集图像文件
+            imgs = collect_all_images(args.input_dir)
+            if not imgs:
+                raise FileNotFoundError("在指定目录中未找到图像文件")
+            
+            # 应用过滤（如果提供了过滤参数）
+            filtered_imgs = imgs
+            if hasattr(args, 'filter_medium') and args.filter_medium != 'all':
+                filtered_imgs = [img for img in filtered_imgs 
+                               if args.filter_medium.lower() in img.stem.lower()]
+                print(f"   培养基过滤: {args.filter_medium} ({len(filtered_imgs)}/{len(imgs)} 个文件)")
+            
+            if hasattr(args, 'filter_side') and args.filter_side != 'all':
+                filtered_imgs = [img for img in filtered_imgs 
+                               if args.filter_side.lower() in img.stem.lower()]
+                print(f"   拍摄面过滤: {args.filter_side} ({len(filtered_imgs)}/{len(imgs)} 个文件)")
+            
+            if hasattr(args, 'filter_sample') and args.filter_sample:
+                filtered_imgs = [img for img in filtered_imgs 
+                               if args.filter_sample.lower() in img.stem.lower()]
+                print(f"   样本名过滤: {args.filter_sample} ({len(filtered_imgs)}/{len(imgs)} 个文件)")
+            
+            if not filtered_imgs:
+                print("❌ 没有符合过滤条件的图像文件")
+                return 1
+            
+            # 交互确认
             if args.interactive:
-                imgs = collect_all_images(args.input_dir)
-                if not imgs:
-                    raise FileNotFoundError("在指定目录中未找到图像文件")
-                print("即将处理以下图像:\n" + "\n".join(str(p) for p in imgs))
+                print(f"\n即将处理 {len(filtered_imgs)} 个图像文件:")
+                # 显示前5个和后2个文件
+                if len(filtered_imgs) <= 7:
+                    for img in filtered_imgs:
+                        print(f"  - {img.name}")
+                else:
+                    for img in filtered_imgs[:5]:
+                        print(f"  - {img.name}")
+                    print(f"  ... (还有 {len(filtered_imgs)-7} 个文件)")
+                    for img in filtered_imgs[-2:]:
+                        print(f"  - {img.name}")
+                
+                cont = input("\n继续? [y/N]: ").strip().lower()
+                if cont != "y":
+                    return 0
+            
+            # 执行批处理
+            # 传递额外的参数给批处理函数
+            batch_args = {
+                'device': args.device,
+                'mode': args.mode,
+                'model': args.model,
+                'min_area': args.min_area,
+                'force_96plate_detection': args.force_96plate_detection,
+                'fallback_null_policy': args.fallback_null_policy,
+                'debug': args.debug,
+                'well_plate': args.well_plate,
+                'rows': args.rows,
+                'cols': args.cols,
+            }
+            
+            # 使用过滤后的图像列表
+            batch_medium_pipeline(
+                filtered_imgs,  # 传递过滤后的图像列表而不是目录
+                args.output,
+                **batch_args
+            )
+            
+            # 配对前后视图
+            pair_colonies_across_views(args.output)
+            
+            print(f"\n✅ 批处理完成！")
+            print(f"   处理图像: {len(filtered_imgs)} 个")
+            print(f"   输出目录: {args.output}")
+            
+            return 0
+
+        # ========== 单图像/多图像模式 ==========
+        else:
+            # 单图像模式必须有 medium 和 side 参数
+            if not args.medium or not args.side:
+                print("\n❌ 错误：单图像模式需要指定 --medium 和 --side 参数")
+                print("\n示例:")
+                print("  python main.py -i image.jpg -o results --medium MM --side back")
+                print("\n或使用批处理模式:")
+                print("  python main.py -I Image_input -o results")
+                return 1
+            
+            images = args.image
+
+            if args.interactive and len(images) > 1:
+                print("即将处理以下图像:\n" + "\n".join(images))
                 cont = input("继续? [y/N]: ").strip().lower()
                 if cont != "y":
                     return 0
-            batch_medium_pipeline(args.input_dir, args.output, device=args.device)
-            pair_colonies_across_views(args.output)
+
+            # load and merge config into a ConfigManager instance
+            config_manager = ConfigManager(args.config)
+            config_manager.update_from_args(args)
+            cfg = config_manager
+            
+            # 处理每个图像
+            for i, img in enumerate(images):
+                print(f"\n处理图像 {i+1}/{len(images)}: {Path(img).name}")
+                
+                img_output = Path(args.output)
+                sample_name = replicate = None
+                stem = Path(img).stem
+                
+                # 根据文件名推断输出结构
+                try:
+                    sample_name, _, _, replicate = parse_filename(stem)
+                except Exception:
+                    pass
+
+                orientation = args.side
+                medium = args.medium
+                
+                if sample_name and replicate:
+                    output_path = get_output_path(stem, replicate, orientation, args.output)
+                    os.makedirs(output_path, exist_ok=True)
+                    img_output = Path(output_path)
+                elif len(images) > 1:
+                    img_output = img_output / stem
+                    os.makedirs(img_output, exist_ok=True)
+                else:
+                    os.makedirs(img_output, exist_ok=True)
+
+                img_args = argparse.Namespace(**vars(args))
+                img_args.image = img
+                img_args.output = str(img_output)
+                img_args.medium = medium
+                img_args.orientation = orientation
+                img_args.replicate = replicate
+                img_args.cfg = cfg
+                
+                pipeline = AnalysisPipeline(img_args)
+                results = pipeline.run()
+                print_completion_summary(results)
+                pair_colonies_across_views(results["output_dir"])
+
             return 0
-        else:
-            images = args.image
-
-        if args.interactive and len(images) > 1:
-            print("即将处理以下图像:\n" + "\n".join(images))
-            cont = input("继续? [y/N]: ").strip().lower()
-            if cont != "y":
-                return 0
-
-        # load and merge config into a ConfigManager instance
-        config_manager = ConfigManager(args.config)
-        config_manager.update_from_args(args)
-        cfg = config_manager
-        for img in images:
-            img_output = Path(args.output)
-            sample_name = replicate = None
-            stem = Path(img).stem
-            # 根据文件名推断输出结构
-            try:
-                sample_name, _, _, replicate = parse_filename(stem)
-            except Exception:
-                pass
-
-            orientation = args.side
-            medium = args.medium
-            if sample_name and replicate:
-                output_path = get_output_path(stem, replicate, orientation, args.output)
-                os.makedirs(output_path, exist_ok=True)
-                img_output = Path(output_path)
-            elif len(images) > 1:
-                img_output = img_output / stem
-                os.makedirs(img_output, exist_ok=True)
-            else:
-                os.makedirs(img_output, exist_ok=True)
-
-            img_args = argparse.Namespace(**vars(args))
-            img_args.image = img
-            img_args.output = str(img_output)
-            img_args.medium = medium
-            img_args.orientation = orientation
-            img_args.replicate = replicate
-            img_args.cfg = cfg
-            pipeline = AnalysisPipeline(img_args)
-            results = pipeline.run()
-            print_completion_summary(results)
-            pair_colonies_across_views(results["output_dir"])
-
-        return 0
 
     except KeyboardInterrupt:
-        logging.info("用户中断程序执行")
+        logging.info("\n用户中断程序执行")
         return 1
     except Exception as e:
         logging.error(f"程序执行失败: {e}")
         if hasattr(args, "debug") and args.debug:
             import traceback
-
             logging.error(traceback.format_exc())
         return 1
 

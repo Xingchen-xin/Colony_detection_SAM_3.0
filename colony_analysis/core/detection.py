@@ -121,6 +121,8 @@ class ColonyDetector:
         processed_img = self._preprocess_image(img_rgb)
 
         # 根据模式执行检测
+        logging.info(f"开始检测，模式: {detection_mode}")
+        
         if detection_mode == "grid":
             colonies = self._detect_grid_mode(processed_img)
         elif detection_mode == "auto":
@@ -129,11 +131,14 @@ class ColonyDetector:
             colonies = self._detect_hybrid_mode(processed_img)
         else:
             raise ValueError(f"不支持的检测模式: {detection_mode}")
-
+        
+        # 添加检测统计
+        logging.info(f"检测完成: {len(colonies)} 个初始候选")
+        
         # 后处理
         colonies = self._post_process_colonies(colonies)
-
-        logging.info(f"检测完成，发现 {len(colonies)} 个菌落")
+        
+        logging.info(f"后处理完成: {len(colonies)} 个最终菌落")
         return colonies
 
     def save_raw_debug(self, img: np.ndarray):

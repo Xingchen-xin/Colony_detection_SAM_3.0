@@ -217,50 +217,67 @@ class SAMModel:
         return masks, scores
 
 
-    def segment_grid(
-        self, image: np.ndarray, rows: int = 8, cols: int = 12, padding: float = 0.05
-    ) -> Tuple[List[np.ndarray], List[str]]:
+    def segment_grid(self, image: np.ndarray, rows: int = 8, cols: int = 12, padding: float = 0.05) -> Tuple[List[np.ndarray], List[str]]:
         """使用网格策略分割规则布局"""
         image = self._preprocess_image(image)
         height, width = image.shape[:2]
-
+        
         cell_height = height / rows
         cell_width = width / cols
-
+        
         masks = []
         labels = []
-
+        
         # 生成行标签 A-H
         row_labels = [chr(65 + i) for i in range(rows)]
-
+        
+        # 添加统计信息
+        successful_segments = 0
+        failed_segments = []
+        
         # 遍历每个网格单元
-        for r, c in tqdm(
-            [(r, c) for r in range(rows) for c in range(cols)],
-            desc="网格分割",
-            ncols=80,
-        ):
+        for r, c in tqdm([(r, c) for r in range(rows) for c in range(cols)], desc="网格分割", ncols=80):
             # 计算单元格边界
             pad_y = int(cell_height * padding)
             pad_x = int(cell_width * padding)
-
+            
             y1 = int(r * cell_height) + pad_y
             y2 = int((r + 1) * cell_height) - pad_y
             x1 = int(c * cell_width) + pad_x
             x2 = int((c + 1) * cell_width) - pad_x
-
+            
             # 创建边界框
             box = np.array([x1, y1, x2, y2])
-
+            well_id = f"{row_labels[r]}{c+1}"
+            
             try:
                 mask, score = self.segment_with_prompts(image, boxes=box)
+                
+                # 添加验证：检查掩码是否有效
+                mask_area = np.sum(mask) if mask is not None else 0
+                
+                if mask_area > 0:  # 只有当掩码有内容时才认为成功
+                    successful_segments += 1
+                    logging.debug(f"网格 {well_id}: 成功分割, 面积={mask_area}, 分数={score:.3f}")
+                else:
+                    failed_segments.append(well_id)
+                    logging.debug(f"网格 {well_id}: 空掩码")
+                
                 masks.append(mask)
-                labels.append(f"{row_labels[r]}{c+1}")
+                labels.append(well_id)
+                
             except Exception as e:
-                logging.warning(f"分割网格单元 {row_labels[r]}{c+1} 失败: {e}")
+                logging.warning(f"分割网格单元 {well_id} 失败: {e}")
                 empty_mask = np.zeros((height, width), dtype=bool)
                 masks.append(empty_mask)
-                labels.append(f"{row_labels[r]}{c+1}")
-
+                labels.append(well_id)
+                failed_segments.append(well_id)
+        
+        # 添加汇总日志
+        logging.info(f"网格分割完成: 成功={successful_segments}/96, 失败={len(failed_segments)}")
+        if failed_segments and len(failed_segments) <= 10:  # 只显示少量失败的
+            logging.info(f"失败的网格: {', '.join(failed_segments)}")
+        
         return masks, labels
 
     def segment_with_prompts(

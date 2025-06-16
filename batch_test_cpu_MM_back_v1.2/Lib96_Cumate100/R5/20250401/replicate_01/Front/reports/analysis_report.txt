@@ -1,0 +1,14 @@
+=== 菌落分析报告 ===
+生成时间: 2025-06-14 12:47:29
+
+检测到的菌落总数: 50
+平均面积: 5689.84
+面积范围: 521.00 - 9222.00
+检测模式: hybrid
+SAM模型: vit_h
+
+=== 表型分布 ===
+development_state:
+metabolite_production:
+colony_morphology:
+  wrinkled: 50

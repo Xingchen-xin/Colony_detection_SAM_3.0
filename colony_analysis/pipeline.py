@@ -6,7 +6,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import json
 
 from tqdm import tqdm
@@ -158,7 +158,14 @@ class AnalysisPipeline:
         else:
             cfg_dir = cfg_source
         self.cfg_loader = ConfigLoader(cfg_dir)
-        sam_path = self.cfg.get('model_path', "models/sam_vit_h_4b8939.pth")
+        # Select default SAM checkpoint based on model type
+        default_sam_paths = {
+            "vit_b": "models/sam_vit_b_01ec64.pth",
+            "vit_l": "models/sam_vit_l_0b3195.pth",
+            "vit_h": "models/sam_vit_h_4b8939.pth",
+        }
+        model_type = getattr(self.args, "model", "vit_b")
+        sam_path = self.cfg.get("model_path", default_sam_paths.get(model_type, default_sam_paths["vit_b"]))
         self.seg_sam = SamSegmenter(model_path=sam_path, model_type=self.args.model, device=self.args.device)
         unet_path = self.cfg.get('unet_model_path', "models/unet_fallback.pth")
         self.seg_unet = UnetSegmenter(model_path=unet_path, device=self.args.device)
@@ -388,9 +395,7 @@ class AnalysisPipeline:
 
         # 获取plate_grid: {well_id: {center, search_radius, ...}}
         plate_grid = self.config.plate_grid
-        """
-        强制96孔板检测：先做Back色素提示→Hybrid格子优先→全图检测
-        """
+        
         # —— 1) Back 侧颜色提示分割 —— 
         colonies = []
         if getattr(self.args, "orientation", "").lower() == "back":
@@ -431,21 +436,52 @@ class AnalysisPipeline:
                 cols=cols,
                 padding=self.config.detection.edge_margin_ratio
             )
+            
+            # 统计网格检测结果
             grid_cols = []
+            empty_wells = []
             for mask, lab in zip(masks, labels):
-                if mask.sum() > 0:
+                if mask.sum() > self.config.detection.min_colony_area:
                     c = self.detector._extract_colony_data(
                         img_rgb, mask, f"grid_{lab}", "grid"
                     )
-                    c["well_position"] = lab
-                    grid_cols.append(c)
-            logging.info(f"Grid segmentation found {len(grid_cols)} colonies, now auto-detect")
+                    if c:
+                        c["well_position"] = lab
+                        grid_cols.append(c)
+                else:
+                    empty_wells.append(lab)
+                    
+            logging.info(f"Grid segmentation found {len(grid_cols)} colonies in {96-len(empty_wells)} wells")
+            logging.info(f"Empty wells from grid: {', '.join(empty_wells[:10])}{'...' if len(empty_wells) > 10 else ''}")
+            
+            # Auto检测补充
+            logging.info("Now running auto-detect to find additional colonies")
             auto_cols = self.detector.detect(img_rgb, mode="auto")
-            colonies += grid_cols + auto_cols
+            logging.info(f"Auto mode found {len(auto_cols)} colonies")
+            
+            # 合并结果（避免简单拼接）
+            colonies.extend(grid_cols)
+            
+            # 将auto检测的菌落智能分配
+            for auto_col in auto_cols:
+                # 检查是否已经有grid检测结果占据了相近位置
+                auto_centroid = auto_col.get('centroid', (0, 0))
+                too_close = False
+                
+                for grid_col in grid_cols:
+                    grid_centroid = grid_col.get('centroid', (0, 0))
+                    distance = np.sqrt((auto_centroid[0] - grid_centroid[0])**2 + 
+                                    (auto_centroid[1] - grid_centroid[1])**2)
+                    if distance < 50:  # 如果距离太近，认为是重复
+                        too_close = True
+                        break
+                
+                if not too_close:
+                    colonies.append(auto_col)
+                    logging.debug(f"Added auto colony at {auto_centroid}")
         else:
             # 其他模式或非孔板，直接调用
-            colonies += self.detector.detect(img_rgb, mode=self.args.mode)
-
+            colonies.extend(self.detector.detect(img_rgb, mode=self.args.mode))
 
         # 2. 分配菌落到最近well_id
         well_to_candidates = {well: [] for well in plate_grid}
@@ -466,6 +502,8 @@ class AnalysisPipeline:
                     min_well = well_id
             if min_well is not None:
                 well_to_candidates[min_well].append(c)
+                logging.debug(f"Colony {c.get('id')} assigned to well {min_well} (distance: {min_dist:.1f})")
+
         # 修改：不要简单覆盖，而是合并候选        
         for well_id, candlist in well_to_candidates.items():
             if candlist:
@@ -492,9 +530,11 @@ class AnalysisPipeline:
                 area = np.sum(c["mask"] > 0)
                 radii.append(np.sqrt(area / np.pi))
         median_radius = np.median(radii) if radii else 25  # default_radius
+        
         # 4. 遍历每个孔位，输出菌落或推测未生长
         forced_colonies = []
         fallback_policy = getattr(self.args, "fallback_null_policy", "fill")
+        
         # 用于可视化的输出图像副本
         vis_img = img_rgb.copy()
         # 用于PIL标注
@@ -505,6 +545,11 @@ class AnalysisPipeline:
             font = ImageFont.truetype("DejaVuSans.ttf", 18)
         except Exception:
             font = None
+            
+        # 统计信息
+        detected_wells = []
+        inferred_wells = []
+        
         for well_id in sorted(plate_grid.keys()):
             candidates = well_to_candidates[well_id]
             info = plate_grid[well_id]
@@ -512,6 +557,7 @@ class AnalysisPipeline:
             wx, wy = int(wx), int(wy)
             est_radius = int(median_radius)
             est_area = float(np.pi * (est_radius ** 2))
+            
             if candidates:
                 # 按分数或面积排序，选取最佳
                 best = max(candidates, key=lambda cc: cc.get("scores", {}).get("overall_score", 0) if "scores" in cc else cc.get("area", 0))
@@ -522,6 +568,7 @@ class AnalysisPipeline:
                 best["colony_status"] = "detected"
                 best["growth_status"] = "normal"
                 forced_colonies.append(best)
+                detected_wells.append(well_id)
             else:
                 if fallback_policy == "skip":
                     continue
@@ -549,6 +596,7 @@ class AnalysisPipeline:
                     "well_id": well_id,
                     "well_position": well_id,
                     "center": (wx, wy),
+                    "centroid": (wy, wx),  # 添加centroid以保持兼容性
                     "radius": est_radius,
                     "area": est_area,
                     "intensity_mean": local_mean,
@@ -567,7 +615,9 @@ class AnalysisPipeline:
                     "phenotype": {},
                 }
                 forced_colonies.append(inferred_colony)
-                # --- 可视化: 灰色虚线圆, 标记“推测未生长” ---
+                inferred_wells.append(well_id)
+                
+                # --- 可视化: 灰色虚线圆, 标记"推测未生长" ---
                 circle_color = (160, 160, 160, 180)  # 灰色
                 thickness = 2
                 # 绘制虚线圆
@@ -576,24 +626,82 @@ class AnalysisPipeline:
                     start_angle = angle
                     end_angle = angle + dash_len
                     draw.arc([wx - est_radius, wy - est_radius, wx + est_radius, wy + est_radius],
-                             start=start_angle, end=end_angle, fill=circle_color, width=thickness)
+                            start=start_angle, end=end_angle, fill=circle_color, width=thickness)
                 # 标注文字
-                label = "推测未生长"
+                label = "推测未生长" if growth_status == "non-growing" else "推测"
                 text_color = (220, 0, 0) if growth_status == "non-growing" else (80, 80, 80)
                 text_xy = (wx + est_radius + 2, wy - 12)
                 if font:
                     draw.text(text_xy, label, fill=text_color, font=font)
                 else:
                     draw.text(text_xy, label, fill=text_color)
+        
+        # 打印统计信息
+        logging.info(f"强制96孔板检测完成: 检测到 {len(detected_wells)} 个菌落, 推测 {len(inferred_wells)} 个空孔位")
+        
         # 保存可视化到debug目录
-        debug_dir = self.result_manager.directories.get("debug", None)
-        if debug_dir:
-            vis_save_path = os.path.join(debug_dir, "force96_inferred.png")
-            try:
-                pil_img.save(vis_save_path)
-            except Exception:
-                pass
-        return forced_colonies
+        if self.args.debug:
+            debug_dir = self.result_manager.directories.get("debug", None)
+            if debug_dir:
+                vis_save_path = os.path.join(debug_dir, "force96_inferred.png")
+                try:
+                    pil_img.save(vis_save_path)
+                    logging.info(f"保存推测可视化到: {vis_save_path}")
+                except Exception as e:
+                    logging.error(f"保存推测可视化失败: {e}")
+        
+        return forced_colonies  # 保持原有返回格式
+
+    def _find_nearest_well(self, colony: Dict, plate_grid: Dict[str, Dict]) -> Optional[str]:
+        """找到菌落最近的孔位"""
+        centroid = colony.get('centroid')
+        if not centroid:
+            return None
+        
+        min_distance = float('inf')
+        nearest_well = None
+        
+        for well_id, well_info in plate_grid.items():
+            well_center = well_info['center']
+            distance = np.sqrt((centroid[0] - well_center[0])**2 + 
+                            (centroid[1] - well_center[1])**2)
+            
+            if distance < min_distance and distance < well_info.get('search_radius', 100):
+                min_distance = distance
+                nearest_well = well_id
+        
+        return nearest_well
+
+    def _create_inferred_colony(self, well_id: str, well_info: Dict, img_rgb: np.ndarray) -> Dict:
+        """为空孔位创建推测的菌落条目"""
+        wy, wx = well_info["center"]
+        wx, wy = int(wx), int(wy)
+        
+        # 提取局部区域特征
+        est_radius = int(well_info.get('search_radius', 30))
+        mask = np.zeros(img_rgb.shape[:2], dtype=np.uint8)
+        cv2.circle(mask, (wx, wy), est_radius, 1, thickness=-1)
+        
+        local_pixels = img_rgb[mask > 0]
+        local_mean = float(np.mean(local_pixels)) if local_pixels.size > 0 else 0.0
+        
+        return {
+            "id": f"inferred_{well_id}",
+            "well_position": well_id,
+            "centroid": (wy, wx),
+            "area": float(np.pi * est_radius**2),
+            "colony_status": "inferred",
+            "is_null": True,
+            "forced_96plate": True,
+            "sam_score": 0.0,
+            "features": {
+                "area": float(np.pi * est_radius**2),
+                "intensity_mean": local_mean,
+            }
+        }
+
+
+
 
     def _initialize_components(self):
         """初始化所有组件"""
@@ -916,20 +1024,22 @@ class AnalysisPipeline:
 
 
 
-def batch_medium_pipeline(input_folder: str, output_folder: str, device: str = "cuda"):
+def batch_medium_pipeline(img_paths: List[Path], output_folder: str, **kwargs):
     """批量处理多培养基、多角度、多重复的图像"""
-    img_paths = collect_all_images(input_folder)
+    """批量处理指定的图像列表"""
     if not img_paths:
-        logging.warning(f"在 {input_folder} 未发现任何图片文件。")
+        logging.warning("没有图像需要处理")
         return
 
     from collections import defaultdict
     groups: Dict[Tuple[str, str, str], Dict[str, Path]] = defaultdict(dict)
 
+    # 组织图像
     for img_path in img_paths:
         sample_name, medium, orientation, replicate = parse_filename(img_path.stem)
         key = (sample_name, medium, replicate)
         groups[key][orientation] = img_path
+
 
     # 新增: 自动解析文件名并构造输出路径
     from pathlib import Path
@@ -955,7 +1065,7 @@ def batch_medium_pipeline(input_folder: str, output_folder: str, device: str = "
     start_all = time.time()
     group_items = list(groups.items())
     for (sample_name, medium, replicate), ori_dict in tqdm(
-        group_items, desc="Batch processing", ncols=80
+        groups.items(), desc="Batch processing", ncols=80
     ):
         step_start = time.time()
 
@@ -975,15 +1085,21 @@ def batch_medium_pipeline(input_folder: str, output_folder: str, device: str = "
                         input=None,
                         input_dir=None,
                         output=output_path,
-                        mode="hybrid",
-                        model="vit_h",
-                        debug=True,
-                        verbose=True,
-                        advanced=True,
+                        mode=kwargs.get('mode', 'hybrid'),
+                        model=kwargs.get('model', 'vit_h'),
+                        debug=kwargs.get('debug', False),
+                        verbose=kwargs.get('verbose', False),
+                        advanced=kwargs.get('advanced', False),
                         config=None,
                         orientation=orientation,
                         medium=medium,
-                        device=device,
+                        device=kwargs.get('device', 'cuda'),
+                        min_area=kwargs.get('min_area', 800),
+                        well_plate=kwargs.get('well_plate', True),
+                        rows=kwargs.get('rows', 8),
+                        cols=kwargs.get('cols', 12),
+                        force_96plate_detection=kwargs.get('force_96plate_detection', False),
+                        fallback_null_policy=kwargs.get('fallback_null_policy', 'fill'),
                     )
                     args.rows = 8
                     args.cols = 12
