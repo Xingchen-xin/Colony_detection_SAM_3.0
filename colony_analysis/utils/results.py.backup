@@ -45,7 +45,7 @@ class ResultManager:
         return directories
 
     def save_all_results(self, colonies: List[Dict], args) -> Dict[str, str]:
-        """保存所有结果 - 修复版本"""
+        """保存所有结果"""
         saved_files = {}
 
         try:
@@ -55,194 +55,102 @@ class ResultManager:
 
             # 2. 保存JSON结果（如果是高级分析）
             if getattr(args, "advanced", False):
-                try:
-                    json_path = self.save_json_results(colonies)
-                    saved_files["json"] = str(json_path)
-                except Exception as e:
-                    logging.error(f"保存JSON结果失败: {e}")
+                json_path = self.save_json_results(colonies)
+                saved_files["json"] = str(json_path)
 
             # 3. 保存菌落图像
-            try:
-                images_dir = self.save_colony_images(colonies)
-                saved_files["images"] = str(images_dir)
-            except Exception as e:
-                logging.error(f"保存菌落图像失败: {e}")
+            images_dir = self.save_colony_images(colonies)
+            saved_files["images"] = str(images_dir)
 
             # 4. 保存掩码（如果启用调试）
             if getattr(args, "debug", False):
-                try:
-                    masks_dir = self.save_colony_masks(colonies)
-                    saved_files["masks"] = str(masks_dir)
+                masks_dir = self.save_colony_masks(colonies)
+                saved_files["masks"] = str(masks_dir)
 
-                    # 将 metabolite 调试图像复制到输出 debug 目录
-                    metabolite_debug_src = Path("debug_metabolite")
-                    if metabolite_debug_src.exists() and metabolite_debug_src.is_dir():
-                        for f in metabolite_debug_src.iterdir():
-                            if f.is_file():
-                                try:
-                                    shutil.move(str(f), str(self.directories["debug"] / f.name))
-                                except Exception as e:
-                                    logging.warning(f"移动调试文件失败: {f.name}, 错误: {e}")
-                        # 可选：删除源目录
-                        try:
-                            metabolite_debug_src.rmdir()
-                        except OSError:
-                            pass
-                except Exception as e:
-                    logging.error(f"保存掩码失败: {e}")
+                # 将 metabolite 调试图像复制到输出 debug 目录
+                metabolite_debug_src = Path("debug_metabolite")
+                if metabolite_debug_src.exists() and metabolite_debug_src.is_dir():
+                    for f in metabolite_debug_src.iterdir():
+                        if f.is_file():
+                            shutil.move(str(f), str(self.directories["debug"] / f.name))
+                    # 可选：删除源目录
+                    try:
+                        metabolite_debug_src.rmdir()
+                    except OSError:
+                        pass
 
             # 5. 生成分析报告
-            try:
-                report_path = self.generate_analysis_report(colonies, args)
-                saved_files["report"] = str(report_path)
-            except Exception as e:
-                logging.error(f"生成分析报告失败: {e}")
-                # 创建最小报告
-                try:
-                    minimal_report_path = self.directories["reports"] / "minimal_report.txt"
-                    with open(minimal_report_path, "w", encoding="utf-8") as f:
-                        f.write(f"分析完成\n")
-                        f.write(f"总菌落数: {len(colonies)}\n")
-                        f.write(f"报告生成错误: {e}\n")
-                    saved_files["report"] = str(minimal_report_path)
-                except Exception:
-                    pass
+            report_path = self.generate_analysis_report(colonies, args)
+            saved_files["report"] = str(report_path)
 
             logging.info(f"结果保存完成: {len(saved_files)} 个文件/目录")
             return saved_files
 
         except Exception as e:
             logging.error(f"保存结果时发生错误: {e}")
-            # 确保至少返回部分结果
-            return saved_files
-
+            raise
 
     def save_csv_results(self, colonies: List[Dict]) -> Path:
-        """保存CSV格式的结果 - 修复版本"""
+        """保存CSV格式的结果"""
         rows = []
 
         for colony in tqdm(colonies, desc="保存CSV结果", ncols=80):
-            try:
-                row = {
-                    "id": colony.get("id", "unknown"),
-                    "well_position": colony.get("well_position", ""),
-                    "area": float(colony.get("area", 0)),
-                    "detection_method": colony.get("detection_method", "unknown"),
-                    "sam_score": float(colony.get("sam_score", 0.0)),
-                    "quality_score": float(colony.get("quality_score", 0)),
-                    "cross_boundary": bool(colony.get("cross_boundary", False)),
-                    "overlapping_wells": ",".join(colony.get("overlapping_wells", [])),
-                }
+            row = {
+                "id": colony.get("id", "unknown"),
+                "well_position": colony.get("well_position", ""),
+                "area": float(colony.get("area", 0)),
+                "detection_method": colony.get("detection_method", "unknown"),
+                "sam_score": colony.get("sam_score", 0.0),
+                "quality_score": colony.get("quality_score", 0),
+                "cross_boundary": colony.get("cross_boundary", False),
+                "overlapping_wells": ",".join(colony.get("overlapping_wells", [])),
+            }
 
-                # 安全地添加特征
-                features = colony.get("features", {})
-                if isinstance(features, dict):
-                    for name, value in features.items():
-                        try:
-                            row[f"feature_{name}"] = self._safe_convert_value(value)
-                        except Exception as e:
-                            logging.warning(f"转换特征 {name} 失败: {e}")
-                            row[f"feature_{name}"] = str(value) if value is not None else ""
+            # 添加特征
+            features = colony.get("features", {})
+            for name, value in features.items():
+                row[f"feature_{name}"] = self._safe_convert_value(value)
 
-                # 安全地添加评分
-                scores = colony.get("scores", {})
-                if isinstance(scores, dict):
-                    for name, value in scores.items():
-                        try:
-                            row[f"score_{name}"] = self._safe_convert_value(value)
-                        except Exception as e:
-                            logging.warning(f"转换评分 {name} 失败: {e}")
-                            row[f"score_{name}"] = str(value) if value is not None else ""
+            # 添加评分
+            scores = colony.get("scores", {})
+            for name, value in scores.items():
+                row[f"score_{name}"] = self._safe_convert_value(value)
 
-                # 安全地添加表型
-                phenotype = colony.get("phenotype", {})
-                if isinstance(phenotype, dict):
-                    for name, value in phenotype.items():
-                        try:
-                            # 处理可能的列表类型
-                            if isinstance(value, list):
-                                row[f"phenotype_{name}"] = ", ".join(map(str, value)) if value else ""
-                            elif value is None:
-                                row[f"phenotype_{name}"] = ""
-                            else:
-                                row[f"phenotype_{name}"] = str(value)
-                        except Exception as e:
-                            logging.warning(f"转换表型 {name} 失败: {e}")
-                            row[f"phenotype_{name}"] = str(value) if value is not None else ""
-                
-                rows.append(row)
-                
-            except Exception as e:
-                logging.error(f"处理菌落 {colony.get('id', 'unknown')} 时出错: {e}")
-                # 添加最小的行数据，确保CSV生成不会完全失败
-                rows.append({
-                    "id": colony.get("id", "unknown"),
-                    "well_position": colony.get("well_position", ""),
-                    "area": 0.0,
-                    "detection_method": "error",
-                    "sam_score": 0.0,
-                    "quality_score": 0.0,
-                    "cross_boundary": False,
-                    "overlapping_wells": "",
-                    "error": str(e)
-                })
+            # 添加表型
+            phenotype = colony.get("phenotype", {})
+            for name, value in phenotype.items():
+                # 处理可能的列表类型
+                if isinstance(value, list):
+                    row[f"phenotype_{name}"] = ", ".join(map(str, value))
+                else:
+                    row[f"phenotype_{name}"] = str(value)
+            rows.append(row)
 
         # 保存CSV
-        try:
-            if not rows:
-                # 如果没有数据，创建空的DataFrame
-                rows = [{
-                    "id": "no_data",
-                    "well_position": "",
-                    "area": 0.0,
-                    "detection_method": "none",
-                    "note": "没有菌落数据"
-                }]
-            
-            df = pd.DataFrame(rows)
-            csv_path = self.directories["results"] / "analysis_results.csv"
-            df.to_csv(csv_path, index=False, encoding="utf-8")
-            logging.info(f"CSV结果已保存: {csv_path}")
-            return csv_path
-            
-        except Exception as e:
-            logging.error(f"保存CSV失败: {e}")
-            # 创建最基本的CSV文件
-            csv_path = self.directories["results"] / "analysis_results.csv"
-            with open(csv_path, "w", encoding="utf-8") as f:
-                f.write("id,error\n")
-                f.write(f"failed,{str(e)}\n")
-            return csv_path
+        df = pd.DataFrame(rows)
+        csv_path = self.directories["results"] / "analysis_results.csv"
+        df.to_csv(csv_path, index=False, encoding="utf-8")
 
+        logging.info(f"CSV结果已保存: {csv_path}")
+        return csv_path
 
-    def _safe_convert_value(self, value: Any) -> Any:
-        """安全转换值为可序列化类型 - 增强版本"""
-        try:
-            if value is None:
-                return None
-            elif isinstance(value, np.ndarray):
-                if value.size == 0:
-                    return []
-                return value.tolist()
-            elif isinstance(value, np.generic):
-                return value.item()
-            elif isinstance(value, (list, tuple)):
-                return [self._safe_convert_value(v) for v in value]
-            elif isinstance(value, dict):
-                return {str(k): self._safe_convert_value(v) for k, v in value.items()}
-            elif isinstance(value, (int, float)):
-                # 处理特殊数值
-                if np.isnan(value) or np.isinf(value):
-                    return 0.0
-                return float(value)
-            elif isinstance(value, (str, bool)):
-                return value
-            else:
-                # 对于未知类型，尝试转换为字符串
-                return str(value)
-        except Exception as e:
-            logging.warning(f"值转换失败: {value} (类型: {type(value)}), 错误: {e}")
-            return str(value) if value is not None else None
+    def convert_to_serializable(self, obj):
+        """递归将数据转换为可序列化的格式"""
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            # 遍历字典并递归处理每个值
+            return {k: self.convert_to_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            # 遍历列表并递归处理每个元素
+            return [self.convert_to_serializable(i) for i in obj]
+        else:
+            # 对于其他类型，直接返回
+            return obj
 
     def save_json_results(self, colonies):
         """保存JSON格式的详细结果"""
@@ -400,37 +308,18 @@ class ResultManager:
 
         for colony in colonies:
             phenotype = colony.get("phenotype", {})
-            
-            # 确保 phenotype 是字典类型
-            if not isinstance(phenotype, dict):
-                logging.warning(f"菌落 {colony.get('id', 'unknown')} 的表型数据不是字典格式")
-                continue
-                
             for category, value in phenotype.items():
                 if category not in phenotype_stats:
                     phenotype_stats[category] = {}
-                
-                # 🔥 修复：将处理 value 的逻辑移到循环内部
-                try:
-                    # 处理特殊情况：如果值是列表，转换为字符串
-                    if isinstance(value, list):
-                        value_key = ", ".join(map(str, value)) if value else "none"
-                    elif value is None:
-                        value_key = "none"
-                    else:
-                        value_key = str(value)
+            # 处理特殊情况：如果值是列表，转换为字符串
+            if isinstance(value, list):
+                value_key = ", ".join(map(str, value)) if value else "none"
+            else:
+                value_key = value
 
-                    phenotype_stats[category][value_key] = (
-                        phenotype_stats[category].get(value_key, 0) + 1
-                    )
-                except Exception as e:
-                    logging.warning(f"处理表型数据时出错: category={category}, value={value}, error={e}")
-                    # 使用安全的默认值
-                    value_key = "error"
-                    phenotype_stats[category][value_key] = (
-                        phenotype_stats[category].get(value_key, 0) + 1
-                    )
-        
+            phenotype_stats[category][value_key] = (
+                phenotype_stats[category].get(value_key, 0) + 1
+            )
         return phenotype_stats
 
     def _generate_quality_metrics(self, colonies: List[Dict]) -> Dict:
@@ -515,31 +404,3 @@ class ResultManager:
             return {k: self._safe_convert_value(v) for k, v in value.items()}
         else:
             return value
-# ============================================================================
-# 修复 colony_analysis/utils/results.py 中的变量作用域错误
-# ============================================================================
-
-# 问题描述：
-# 在 _generate_phenotype_stats 方法中，由于缩进错误导致 value 变量
-# 在循环外部被访问，造成 UnboundLocalError
-
-# 解决方案：
-# 1. 修复 _generate_phenotype_stats 方法的缩进
-# 2. 增加异常处理以防止类似问题
-# 3. 改进数据验证
-
-# ============================================================================
-# 请将以下代码替换 colony_analysis/utils/results.py 中对应的方法
-# ============================================================================
-
-
-
-
-
-
-# ============================================================================
-# 使用说明：
-# 1. 备份原始的 colony_analysis/utils/results.py 文件
-# 2. 用以上修复的方法替换原文件中对应的方法
-# 3. 重新运行程序
-# ============================================================================
