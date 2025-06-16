@@ -1802,3 +1802,75 @@ class ColonyDetector:
             if colony_data:
                 colonies.append(colony_data)
         return colonies
+
+    # ========================================
+    # 将以下方法添加到 ColonyDetector 类的末尾 (detection.py)
+    # ========================================
+
+    def segment_grid(self, img_rgb: np.ndarray, rows: int = 8, cols: int = 12, padding: float = 0.05):
+        """
+        网格分割的代理方法，调用 SAMModel 的 segment_grid 方法
+        
+        Args:
+            img_rgb: RGB图像
+            rows: 网格行数
+            cols: 网格列数  
+            padding: 边距比例
+            
+        Returns:
+            Tuple[List[np.ndarray], List[str]]: (masks, labels)
+        """
+        return self.sam_model.segment_grid(img_rgb, rows=rows, cols=cols, padding=padding)
+
+    def segment_with_prompts(self, img_rgb: np.ndarray, points=None, point_labels=None, boxes=None):
+        """
+        基于提示的分割代理方法，调用 SAMModel 的 segment_with_prompts 方法
+        
+        Args:
+            img_rgb: RGB图像
+            points: 提示点
+            point_labels: 点标签
+            boxes: 边界框
+            
+        Returns:
+            Tuple[np.ndarray, float]: (mask, score)
+        """
+        return self.sam_model.segment_with_prompts(img_rgb, points=points, point_labels=point_labels, boxes=boxes)
+
+    def _find_nearest_well(self, colony: Dict) -> Optional[str]:
+        """
+        为菌落找到最近的孔位
+        
+        Args:
+            colony: 菌落数据字典，必须包含 'centroid' 键
+        
+        Returns:
+            Optional[str]: 最近的孔位ID，如果没有找到则返回None
+        """
+        if not hasattr(self.config, 'plate_grid') or not self.config.plate_grid:
+            return None
+            
+        centroid = colony.get('centroid')
+        if not centroid:
+            return None
+        
+        min_distance = float('inf')
+        nearest_well = None
+        
+        for well_id, well_info in self.config.plate_grid.items():
+            well_center = well_info['center']
+            distance = np.sqrt((centroid[0] - well_center[0])**2 + 
+                            (centroid[1] - well_center[1])**2)
+            
+            search_radius = well_info.get('search_radius', 100)
+            if distance < min_distance and distance < search_radius * 1.5:
+                min_distance = distance
+                nearest_well = well_id
+        
+        return nearest_well
+
+    # ========================================
+    # 还需要添加必要的导入 (在文件顶部)
+    # ========================================
+    # 确保在 detection.py 文件顶部有这些导入:
+    # from typing import Dict, List, Optional, Tuple
