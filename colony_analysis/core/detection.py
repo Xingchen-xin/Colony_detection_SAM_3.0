@@ -549,15 +549,11 @@ class ColonyDetector:
     def _create_plate_grid(
         self, img_shape: Tuple[int, int], rows: int = 8, cols: int = 12
     ) -> Dict[str, Dict]:
-        """创建孔板网格映射
-
-        如果 ``self.config`` 中提供 ``plate_grid`` 信息，则优先使用该网格。
-        支持两种格式：
-
-        1. ``{well_id: (row, col, x, y, r)}``
-        2. ``{well_id: {center, search_radius, row, col, expected_bbox}}``
+        """创建孔板网格映射 - 修复版本
+        
+        修复坐标系统和搜索半径的问题
         """
-
+        
         # 优先使用外部给定的网格
         if hasattr(self.config, "plate_grid") and self.config.plate_grid:
             grid = self.config.plate_grid
@@ -586,44 +582,102 @@ class ColonyDetector:
                     }
                 return converted
 
-        # 未提供网格时按图像大小生成静态均匀网格
+        # **修复：改进静态网格生成**
         height, width = img_shape
-
-        margin_y = height * 0.03  # 3%边距
-        margin_x = width * 0.03
-
+        
+        # **修复1：使用更合适的边距**
+        margin_y = height * 0.05  # 5%边距，之前是3%
+        margin_x = width * 0.05
+        
         usable_height = height - 2 * margin_y
         usable_width = width - 2 * margin_x
-
+        
         cell_height = usable_height / rows
         cell_width = usable_width / cols
-
+        
+        # **修复2：计算更合适的搜索半径**
+        base_radius = min(cell_height, cell_width) * 0.4  # 减小基础半径避免重叠
+        min_radius = 30  # 最小半径
+        max_radius = 80  # 最大半径
+        search_radius = max(min_radius, min(max_radius, base_radius))
+        
         plate_grid = {}
         row_labels = [chr(65 + i) for i in range(rows)]  # A-H
-
+        
+        logging.info(f"Creating plate grid: {rows}x{cols}, cell_size: {cell_height:.1f}x{cell_width:.1f}")
+        logging.info(f"Image size: {height}x{width}, margins: {margin_y:.1f}x{margin_x:.1f}")
+        logging.info(f"Search radius: {search_radius:.1f}")
+        
         for r in range(rows):
             for c in range(cols):
                 well_id = f"{row_labels[r]}{c+1}"
-
+                
+                # **修复3：确保中心点计算正确**
                 center_y = margin_y + (r + 0.5) * cell_height
                 center_x = margin_x + (c + 0.5) * cell_width
-
-                search_radius = min(cell_height, cell_width) * 0.75
-
+                
+                # **修复4：边界框计算**
+                bbox_y1 = int(center_y - cell_height / 2)
+                bbox_x1 = int(center_x - cell_width / 2)
+                bbox_y2 = int(center_y + cell_height / 2)
+                bbox_x2 = int(center_x + cell_width / 2)
+                
                 plate_grid[well_id] = {
-                    "center": (center_y, center_x),
-                    "search_radius": search_radius,
+                    "center": (float(center_y), float(center_x)),  # 注意：(y, x)顺序
+                    "search_radius": float(search_radius),
                     "row": r,
                     "col": c,
-                    "expected_bbox": (
-                        int(center_y - cell_height / 2),
-                        int(center_x - cell_width / 2),
-                        int(center_y + cell_height / 2),
-                        int(center_x + cell_width / 2),
-                    ),
+                    "expected_bbox": (bbox_y1, bbox_x1, bbox_y2, bbox_x2),  # (y1, x1, y2, x2)
                 }
-
+        
+        # **修复5：记录一些关键孔位用于调试**
+        key_wells = ["A1", "A12", "H1", "H12", "D6"]  # 四角和中心
+        for well_id in key_wells:
+            if well_id in plate_grid:
+                info = plate_grid[well_id]
+                logging.debug(f"Well {well_id}: center=({info['center'][0]:.1f}, {info['center'][1]:.1f}), "
+                            f"radius={info['search_radius']:.1f}")
+        
         return plate_grid
+
+    # ============================================================================
+    # 额外修复：改进质心-孔位匹配的调试输出
+    # ============================================================================
+
+    def _find_nearest_well_with_debug(self, colony: Dict, plate_grid: Dict[str, Dict]) -> Optional[str]:
+        """
+        为菌落找到最近的孔位 - 带调试信息的版本
+        """
+        centroid = colony.get('centroid')
+        if not centroid:
+            logging.debug(f"Colony {colony.get('id', 'unknown')} has no centroid")
+            return None
+        
+        cy, cx = centroid
+        min_distance = float('inf')
+        nearest_well = None
+        distances = []
+        
+        for well_id, well_info in plate_grid.items():
+            wy, wx = well_info['center']
+            distance = np.sqrt((cy - wy)**2 + (cx - wx)**2)
+            distances.append((well_id, distance))
+            
+            search_radius = well_info.get('search_radius', 100)
+            if distance < min_distance and distance < search_radius * 1.5:  # 扩大搜索半径
+                min_distance = distance
+                nearest_well = well_id
+        
+        # 调试输出：显示最近的几个孔位
+        distances.sort(key=lambda x: x[1])
+        top_5 = distances[:5]
+        
+        colony_id = colony.get('id', 'unknown')
+        logging.debug(f"Colony {colony_id} at ({cy:.1f}, {cx:.1f})")
+        logging.debug(f"  Top 5 nearest wells: {[(w, f'{d:.1f}') for w, d in top_5]}")
+        logging.debug(f"  Selected well: {nearest_well} (distance: {min_distance:.1f})")
+        
+        return nearest_well
 
     def _map_colonies_to_wells(
         self, colonies: List[Dict], plate_grid: Dict[str, Dict]
