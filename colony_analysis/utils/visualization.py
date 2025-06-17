@@ -290,7 +290,9 @@ class Visualizer:
                     h, w = mask.shape[:2]
                     full_mask[minr:minr+h, minc:minc+w] = mask
                 else:
-                    full_mask = cv2.resize(mask, (img_rgb.shape[1], img_rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
+                    orig_dtype = mask.dtype
+                    resized = cv2.resize(mask.astype(np.uint8), (img_rgb.shape[1], img_rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
+                    full_mask = resized.astype(orig_dtype) if orig_dtype == bool else resized
             else:
                 full_mask = mask
 
@@ -507,7 +509,9 @@ class ImprovedVisualizer:
                     h, w = mask.shape[:2]
                     full_mask[minr:minr+h, minc:minc+w] = mask
                 else:
-                    full_mask = cv2.resize(mask, (img_rgb.shape[1], img_rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
+                    orig_dtype = mask.dtype
+                    resized = cv2.resize(mask.astype(np.uint8), (img_rgb.shape[1], img_rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
+                    full_mask = resized.astype(orig_dtype) if orig_dtype == bool else resized
             else:
                 full_mask = mask
 
