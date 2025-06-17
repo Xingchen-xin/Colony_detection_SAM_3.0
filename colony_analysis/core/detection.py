@@ -594,12 +594,13 @@ class ColonyDetector:
         
         cell_height = usable_height / rows
         cell_width = usable_width / cols
-        
+
         # **修复2：计算更合适的搜索半径**
-        base_radius = min(cell_height, cell_width) * 0.4  # 减小基础半径避免重叠
-        min_radius = 30  # 最小半径
-        max_radius = 80  # 最大半径
-        search_radius = max(min_radius, min(max_radius, base_radius))
+        # 原实现根据 cell 大小乘以一个固定系数后再截断，
+        # 当行列数较多或图像尺寸较大时可能导致半径过小。
+        # 这里直接取单元格尺寸的一半作为搜索半径，
+        # 可确保在其所属格子范围内都能成功匹配。
+        search_radius = max(cell_height, cell_width) / 2
         
         plate_grid = {}
         row_labels = [chr(65 + i) for i in range(rows)]  # A-H
