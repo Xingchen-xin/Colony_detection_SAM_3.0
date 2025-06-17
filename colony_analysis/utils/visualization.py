@@ -5,7 +5,7 @@
 import logging
 import random
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import cv2
 import matplotlib.pyplot as plt
@@ -121,21 +121,22 @@ class Visualizer:
             # 生成与 ROI 同尺寸的彩色层
             b, g, r = colors[i]
             colored_layer = np.zeros_like(roi, dtype=np.uint8)
+            # 只取 ROI 对应的掩码，保证尺寸匹配
+            roi_mask = mask[minr:maxr, minc:maxc].astype(bool)
             colored_layer[:, :] = (b, g, r)
 
             # 半透明融合
             alpha = 0.4
-            mask_bool = mask.astype(bool)
-            roi[mask_bool] = cv2.addWeighted(
-                roi[mask_bool], 1 - alpha, colored_layer[mask_bool], alpha, 0
-            )
+            # apply weighted blend to entire ROI, then mask in only the masked pixels
+            blended = cv2.addWeighted(roi, 1 - alpha, colored_layer, alpha, 0)
+            roi[roi_mask] = blended[roi_mask]
 
             # 把修改后的 ROI 写回
             annotated_img[minr:maxr, minc:maxc] = roi
 
             # 轮廓绘制（在 ROI 上绘制再写回）
             contours, _ = cv2.findContours(
-                mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            roi_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
             cv2.drawContours(
                 annotated_img[minr:maxr, minc:maxc], contours, -1, colors[i], 2
@@ -252,3 +253,432 @@ class Visualizer:
         stats_path = self.viz_dir / "statistics.png"
         plt.savefig(stats_path, dpi=150, bbox_inches="tight")
         plt.close()
+    
+    @staticmethod
+    def overlay_masks(img_rgb: np.ndarray, masks: List[np.ndarray], output_path: Path, 
+                      colony_data: Optional[List[Dict]] = None):
+        """在原图上叠加所有掩码"""
+        if not masks:
+            logging.warning("没有掩码需要可视化")
+            return
+        
+        output_path = Path(output_path)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        # 创建叠加图像
+        overlay = img_rgb.copy()
+        
+        # 为每个掩码生成随机颜色
+        colors = []
+        for _ in masks:
+            colors.append([
+                random.randint(100, 255),
+                random.randint(100, 255),
+                random.randint(100, 255)
+            ])
+        
+        # 叠加所有掩码
+        for i, (mask, color) in enumerate(zip(masks, colors)):
+            if mask is None or mask.size == 0:
+                continue
+                
+            # 创建彩色掩码
+            colored_mask = np.zeros_like(img_rgb)
+            for c in range(3):
+                colored_mask[:, :, c] = mask * color[c]
+            
+            # 半透明叠加
+            alpha = 0.4
+            mask_indices = mask > 0
+            overlay[mask_indices] = (
+                overlay[mask_indices] * (1 - alpha) + 
+                colored_mask[mask_indices] * alpha
+            ).astype(np.uint8)
+            
+            # 绘制轮廓
+            contours, _ = cv2.findContours(
+                roi_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            cv2.drawContours(overlay, contours, -1, color, 2)
+            
+            # 添加标签（如果有菌落数据）
+            if colony_data and i < len(colony_data):
+                colony = colony_data[i]
+                if 'centroid' in colony:
+                    cy, cx = colony['centroid']
+                    label = colony.get('well_position', colony.get('id', f'C{i}'))
+                    cv2.putText(overlay, str(label), 
+                              (int(cx-10), int(cy-10)),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, 
+                              (255, 255, 255), 2)
+                    cv2.putText(overlay, str(label), 
+                              (int(cx-10), int(cy-10)),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, 
+                              color, 1)
+        
+        # 保存图像
+        output_file = output_path / "detection_overlay.jpg"
+        success = cv2.imwrite(str(output_file), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+        
+        if success:
+            logging.info(f"检测结果叠加图已保存: {output_file}")
+        else:
+            logging.error(f"保存叠加图失败: {output_file}")
+        
+        # 也保存原图作为参考
+        original_file = output_path / "original_image.jpg"
+        cv2.imwrite(str(original_file), cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR))
+        
+        return overlay
+    
+    def create_annotated_image(self, img_rgb: np.ndarray, colonies: List[Dict], 
+                              sample_name: str, orientation: str):
+        """创建带注释的图像"""
+        annotated = img_rgb.copy()
+        height, width = annotated.shape[:2]
+        
+        # 添加标题
+        title = f"{sample_name} - {orientation}"
+        cv2.putText(annotated, title, (20, 40), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
+        cv2.putText(annotated, title, (20, 40), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 2)
+        
+        # 添加统计信息
+        info_text = f"Total colonies: {len(colonies)}"
+        cv2.putText(annotated, info_text, (20, 80), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(annotated, info_text, (20, 80), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 1)
+        
+        # 标注每个菌落
+        for i, colony in enumerate(colonies):
+            if 'mask' not in colony:
+                continue
+                
+            mask = colony['mask']
+            bbox = colony.get('bbox')
+            
+            if bbox:
+                # 绘制边界框
+                minr, minc, maxr, maxc = bbox
+                cv2.rectangle(annotated, 
+                            (int(minc), int(minr)), 
+                            (int(maxc), int(maxr)), 
+                            (0, 255, 0), 2)
+                
+                # 添加标签
+                label = colony.get('well_position', colony.get('id', f'C{i}'))
+                cv2.putText(annotated, str(label), 
+                          (int(minc), int(minr) - 5),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, 
+                          (0, 255, 0), 2)
+        
+        # 保存注释图像
+        filename = f"annotated_{orientation}_{sample_name}.png"
+        output_path = self.viz_dir / filename
+        cv2.imwrite(str(output_path), cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR))
+        logging.info(f"注释图像已保存: {output_path}")
+        
+        return annotated
+    
+    def create_summary_plot(self, colonies: List[Dict]):
+        """创建统计摘要图"""
+        if not colonies:
+            logging.warning("没有菌落数据用于创建摘要图")
+            return
+        
+        # 提取数据
+        areas = [c.get('area', 0) for c in colonies]
+        scores = [c.get('sam_score', 0) for c in colonies if 'sam_score' in c]
+        
+        # 创建图表
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        
+        # 1. 面积分布直方图
+        axes[0, 0].hist(areas, bins=30, alpha=0.7, color='blue', edgecolor='black')
+        axes[0, 0].set_title('Colony Area Distribution')
+        axes[0, 0].set_xlabel('Area (pixels)')
+        axes[0, 0].set_ylabel('Count')
+        axes[0, 0].grid(True, alpha=0.3)
+        
+        # 2. SAM分数分布
+        if scores:
+            axes[0, 1].hist(scores, bins=20, alpha=0.7, color='green', edgecolor='black')
+            axes[0, 1].set_title('SAM Score Distribution')
+            axes[0, 1].set_xlabel('SAM Score')
+            axes[0, 1].set_ylabel('Count')
+            axes[0, 1].grid(True, alpha=0.3)
+        else:
+            axes[0, 1].text(0.5, 0.5, 'No SAM scores available', 
+                          ha='center', va='center', transform=axes[0, 1].transAxes)
+        
+        # 3. 面积箱线图
+        axes[1, 0].boxplot(areas, vert=True)
+        axes[1, 0].set_title('Colony Area Box Plot')
+        axes[1, 0].set_ylabel('Area (pixels)')
+        axes[1, 0].grid(True, alpha=0.3)
+        
+        # 4. 检测方法分布
+        methods = {}
+        for c in colonies:
+            method = c.get('detection_method', 'unknown')
+            methods[method] = methods.get(method, 0) + 1
+        
+        if methods:
+            axes[1, 1].bar(methods.keys(), methods.values(), alpha=0.7)
+            axes[1, 1].set_title('Detection Method Distribution')
+            axes[1, 1].set_xlabel('Method')
+            axes[1, 1].set_ylabel('Count')
+            axes[1, 1].tick_params(axis='x', rotation=45)
+        
+        plt.tight_layout()
+        
+        # 保存图表
+        output_path = self.viz_dir / 'colony_statistics.png'
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        logging.info(f"统计图表已保存: {output_path}")
+
+
+
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+from pathlib import Path
+import logging
+from typing import List, Dict, Optional
+import random
+
+class ImprovedVisualizer:
+    """改进的可视化工具，确保图像正确保存"""
+    
+    def __init__(self, output_dir: str):
+        self.output_dir = Path(output_dir)
+        self.viz_dir = self.output_dir / "visualizations"
+        self.viz_dir.mkdir(parents=True, exist_ok=True)
+        logging.info(f"可视化输出目录: {self.viz_dir}")
+    
+    @staticmethod
+    def overlay_masks(img_rgb: np.ndarray, masks: List[np.ndarray], output_path: Path, 
+                      colony_data: Optional[List[Dict]] = None):
+        """在原图上叠加所有掩码"""
+        if not masks:
+            logging.warning("没有掩码需要可视化")
+            return
+        
+        output_path = Path(output_path)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        # 创建叠加图像
+        overlay = img_rgb.copy()
+        
+        # 为每个掩码生成随机颜色
+        colors = []
+        for _ in masks:
+            colors.append([
+                random.randint(100, 255),
+                random.randint(100, 255),
+                random.randint(100, 255)
+            ])
+        
+        # 叠加所有掩码
+        for i, (mask, color) in enumerate(zip(masks, colors)):
+            if mask is None or mask.size == 0:
+                continue
+                
+            # 创建彩色掩码
+            colored_mask = np.zeros_like(img_rgb)
+            for c in range(3):
+                colored_mask[:, :, c] = mask * color[c]
+            
+            # 半透明叠加
+            alpha = 0.4
+            mask_indices = mask > 0
+            overlay[mask_indices] = (
+                overlay[mask_indices] * (1 - alpha) + 
+                colored_mask[mask_indices] * alpha
+            ).astype(np.uint8)
+            
+            # 绘制轮廓
+            contours, _ = cv2.findContours(
+                roi_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            cv2.drawContours(overlay, contours, -1, color, 2)
+            
+            # 添加标签（如果有菌落数据）
+            if colony_data and i < len(colony_data):
+                colony = colony_data[i]
+                if 'centroid' in colony:
+                    cy, cx = colony['centroid']
+                    label = colony.get('well_position', colony.get('id', f'C{i}'))
+                    cv2.putText(overlay, str(label), 
+                              (int(cx-10), int(cy-10)),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, 
+                              (255, 255, 255), 2)
+                    cv2.putText(overlay, str(label), 
+                              (int(cx-10), int(cy-10)),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, 
+                              color, 1)
+        
+        # 保存图像
+        output_file = output_path / "detection_overlay.jpg"
+        success = cv2.imwrite(str(output_file), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+        
+        if success:
+            logging.info(f"检测结果叠加图已保存: {output_file}")
+        else:
+            logging.error(f"保存叠加图失败: {output_file}")
+        
+        # 也保存原图作为参考
+        original_file = output_path / "original_image.jpg"
+        cv2.imwrite(str(original_file), cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR))
+        
+        return overlay
+    
+    def create_annotated_image(self, img_rgb: np.ndarray, colonies: List[Dict], 
+                              sample_name: str, orientation: str):
+        """创建带注释的图像"""
+        annotated = img_rgb.copy()
+        height, width = annotated.shape[:2]
+        
+        # 添加标题
+        title = f"{sample_name} - {orientation}"
+        cv2.putText(annotated, title, (20, 40), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
+        cv2.putText(annotated, title, (20, 40), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 2)
+        
+        # 添加统计信息
+        info_text = f"Total colonies: {len(colonies)}"
+        cv2.putText(annotated, info_text, (20, 80), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(annotated, info_text, (20, 80), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 1)
+        
+        # 标注每个菌落
+        for i, colony in enumerate(colonies):
+            if 'mask' not in colony:
+                continue
+                
+            mask = colony['mask']
+            bbox = colony.get('bbox')
+            
+            if bbox:
+                # 绘制边界框
+                minr, minc, maxr, maxc = bbox
+                cv2.rectangle(annotated, 
+                            (int(minc), int(minr)), 
+                            (int(maxc), int(maxr)), 
+                            (0, 255, 0), 2)
+                
+                # 添加标签
+                label = colony.get('well_position', colony.get('id', f'C{i}'))
+                cv2.putText(annotated, str(label), 
+                          (int(minc), int(minr) - 5),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, 
+                          (0, 255, 0), 2)
+        
+        # 保存注释图像
+        filename = f"annotated_{orientation}_{sample_name}.png"
+        output_path = self.viz_dir / filename
+        cv2.imwrite(str(output_path), cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR))
+        logging.info(f"注释图像已保存: {output_path}")
+        
+        return annotated
+    
+    def create_summary_plot(self, colonies: List[Dict]):
+        """创建统计摘要图"""
+        if not colonies:
+            logging.warning("没有菌落数据用于创建摘要图")
+            return
+        
+        # 提取数据
+        areas = [c.get('area', 0) for c in colonies]
+        scores = [c.get('sam_score', 0) for c in colonies if 'sam_score' in c]
+        
+        # 创建图表
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        
+        # 1. 面积分布直方图
+        axes[0, 0].hist(areas, bins=30, alpha=0.7, color='blue', edgecolor='black')
+        axes[0, 0].set_title('Colony Area Distribution')
+        axes[0, 0].set_xlabel('Area (pixels)')
+        axes[0, 0].set_ylabel('Count')
+        axes[0, 0].grid(True, alpha=0.3)
+        
+        # 2. SAM分数分布
+        if scores:
+            axes[0, 1].hist(scores, bins=20, alpha=0.7, color='green', edgecolor='black')
+            axes[0, 1].set_title('SAM Score Distribution')
+            axes[0, 1].set_xlabel('SAM Score')
+            axes[0, 1].set_ylabel('Count')
+            axes[0, 1].grid(True, alpha=0.3)
+        else:
+            axes[0, 1].text(0.5, 0.5, 'No SAM scores available', 
+                          ha='center', va='center', transform=axes[0, 1].transAxes)
+        
+        # 3. 面积箱线图
+        axes[1, 0].boxplot(areas, vert=True)
+        axes[1, 0].set_title('Colony Area Box Plot')
+        axes[1, 0].set_ylabel('Area (pixels)')
+        axes[1, 0].grid(True, alpha=0.3)
+        
+        # 4. 检测方法分布
+        methods = {}
+        for c in colonies:
+            method = c.get('detection_method', 'unknown')
+            methods[method] = methods.get(method, 0) + 1
+        
+        if methods:
+            axes[1, 1].bar(methods.keys(), methods.values(), alpha=0.7)
+            axes[1, 1].set_title('Detection Method Distribution')
+            axes[1, 1].set_xlabel('Method')
+            axes[1, 1].set_ylabel('Count')
+            axes[1, 1].tick_params(axis='x', rotation=45)
+        
+        plt.tight_layout()
+        
+        # 保存图表
+        output_path = self.viz_dir / 'colony_statistics.png'
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        logging.info(f"统计图表已保存: {output_path}")
+
+
+def save_detection_visualization(img_rgb: np.ndarray, colonies: List[Dict], 
+                               output_dir: str, sample_info: Dict):
+    """保存检测可视化 - 主函数"""
+    viz = ImprovedVisualizer(output_dir)
+    
+    # 1. 创建掩码叠加图
+    masks = [c.get('mask') for c in colonies if 'mask' in c]
+    if masks:
+        viz.overlay_masks(img_rgb, masks, viz.viz_dir, colonies)
+    
+    # 2. 创建带注释的图像
+    sample_name = sample_info.get('sample_name', 'unknown')
+    orientation = sample_info.get('orientation', 'unknown')
+    viz.create_annotated_image(img_rgb, colonies, sample_name, orientation)
+    
+    # 3. 创建统计图表
+    viz.create_summary_plot(colonies)
+    
+    # 4. 保存个体菌落图像（前10个）
+    colonies_dir = Path(output_dir) / "colonies"
+    colonies_dir.mkdir(exist_ok=True)
+    
+    for i, colony in enumerate(colonies[:10]):
+        if 'img' not in colony:
+            continue
+            
+        colony_id = colony.get('well_position', colony.get('id', f'colony_{i}'))
+        filename = f"{colony_id}.jpg"
+        output_path = colonies_dir / filename
+        
+        cv2.imwrite(str(output_path), 
+                   cv2.cvtColor(colony['img'], cv2.COLOR_RGB2BGR))
+        
+    logging.info(f"可视化完成，输出目录: {output_dir}")

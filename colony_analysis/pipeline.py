@@ -23,6 +23,7 @@ from .utils import (
     ImageValidator,
     ResultManager,
     Visualizer,
+    ImprovedVisualizer,
     collect_all_images,
     parse_filename,
 )
@@ -138,23 +139,29 @@ class AnalysisPipeline:
     """分析管道 - 协调整个分析流程"""
 
     def __init__(self, args):
-        """初始化分析管道"""
+        """初始化分析管道 - 修复版本"""
+        # 确保device属性存在
         if not hasattr(args, "device"):
-            args.device = "cuda"
+            args.device = "cuda" if torch.cuda.is_available() else "cpu"
+        
         self.args = args
 
-        # —— 加载并初始化配置管理器 —— 
+        # 加载并初始化配置管理器
         self.config = ConfigManager(self.args.config)
         self.config.update_from_args(self.args)
 
-        # —— 初始化结果管理器 —— 
+        # 初始化结果管理器
         self.result_manager = ResultManager(self.args.output)
 
-        # —— 初始化 SAMModel、检测器和分析器 —— 
-        # 获取 medium 特定的 SAM checkpoint（如果配置中提供）
+        # 处理培养基特定的参数（安全地访问filter_medium）
+        medium = getattr(self.args, 'filter_medium', None) or getattr(self.args, 'medium', 'default')
+        
+        # 从配置中获取培养基特定的SAM checkpoint（如果有）
         medium_params_cfg = getattr(self.config, "medium_params", {}) or {}
-        sam_cfg = medium_params_cfg.get(self.args.filter_medium, {})
+        sam_cfg = medium_params_cfg.get(medium.lower(), {})
         checkpoint_path = sam_cfg.get("sam", {}).get("model_path", None)
+        
+        # 初始化 SAM 模型
         self.sam_model = SAMModel(
             model_type=self.args.model,
             checkpoint_path=checkpoint_path,
@@ -162,29 +169,46 @@ class AnalysisPipeline:
             device=self.args.device
         )
         
+        # 初始化检测器
         self.detector = ColonyDetector(
             self.sam_model,
             config=self.config,
             result_manager=self.result_manager,
             debug=self.args.debug
         )
+        
+        # 获取方向参数（兼容不同的参数名）
+        orientation = getattr(self.args, 'side', None) or getattr(self.args, 'orientation', 'front')
+        
+        # 初始化分析器
         self.analyzer = ColonyAnalyzer(
             self.sam_model,
             config=self.config,
             debug=self.args.debug,
-            orientation=getattr(self.args, 'side', getattr(self.args, 'orientation', 'front'))
+            orientation=orientation.lower() if orientation else 'front'
         )
 
         self.start_time = None
-        # 在 __init__ 末尾
-        # 配置目录名为 'configs'
+        
+        # 配置加载器初始化
         cfg_source = self.args.config or "configs"
-        # 如果用户传的是文件，则用文件所在目录；否则认为它是目录
         if os.path.isfile(cfg_source):
             cfg_dir = str(Path(cfg_source).parent)
         else:
             cfg_dir = cfg_source
-        self.cfg_loader = ConfigLoader(cfg_dir)
+        
+        # 只有在目录存在时才初始化ConfigLoader
+        if os.path.exists(cfg_dir):
+            try:
+                self.cfg_loader = ConfigLoader(cfg_dir)
+            except Exception as e:
+                logging.warning(f"无法加载条件配置: {e}")
+                self.cfg_loader = None
+        else:
+            logging.warning(f"配置目录不存在: {cfg_dir}")
+            self.cfg_loader = None
+            
+        logging.info(f"AnalysisPipeline 初始化完成 - 培养基: {medium}, 方向: {orientation}")
         """         # Select default SAM checkpoint based on model type
         default_sam_paths = {
             "vit_b": "models/sam_vit_b_01ec64.pth",
@@ -1042,20 +1066,147 @@ class AnalysisPipeline:
         return analyzed_colonies
 
     def _save_results(self, analyzed_colonies, img_rgb):
-        """保存结果"""
+        """保存结果 - 增强版本，确保生成可视化"""
         logging.info("保存分析结果...")
 
         # 保存基本结果
-        self.result_manager.save_all_results(analyzed_colonies, self.args)
+        saved_files = self.result_manager.save_all_results(analyzed_colonies, self.args)
+        logging.info(f"基本结果已保存: {saved_files}")
 
-        # 生成可视化
-        if self.args.debug:
-            visualizer = Visualizer(self.args.output)
-            visualizer.create_debug_visualizations(img_rgb, analyzed_colonies)
+        # ===== 重要：确保生成可视化 =====
+        try:
+            # 导入改进的可视化模块
+            from .utils.visualization import ImprovedVisualizer, save_detection_visualization
+            
+            # 准备样本信息
+            sample_info = {
+                'sample_name': getattr(self.args, 'sample_name', 'unknown'),
+                'orientation': getattr(self.args, 'orientation', 'front'),
+                'medium': getattr(self.args, 'medium', 'unknown')
+            }
+            
+            # 创建可视化
+            logging.info("开始生成可视化...")
+            
+            # 1. 使用改进的可视化函数
+            save_detection_visualization(img_rgb, analyzed_colonies, 
+                                    self.args.output, sample_info)
+            
+            # 2. 使用原有的Visualizer（如果存在）
+            if hasattr(Visualizer, 'create_debug_visualizations'):
+                visualizer = Visualizer(self.args.output)
+                visualizer.create_debug_visualizations(img_rgb, analyzed_colonies)
+            
+            # 3. 额外保存一个简单的检测结果图
+            self._save_simple_detection_image(img_rgb, analyzed_colonies)
+            
+            logging.info("可视化生成完成")
+            
+        except Exception as e:
+            logging.error(f"生成可视化时出错: {e}")
+            import traceback
+            logging.error(traceback.format_exc())
+            
+            # 尝试保存最基本的图像
+            try:
+                self._save_basic_images(img_rgb, analyzed_colonies)
+            except:
+                pass
 
-        # 额外: force_96plate_detection 推测未生长可视化已在 _force_96plate_detection 内保存
-
+        # 生成统计报告
+        self._generate_stats_file(analyzed_colonies)
+        
         logging.info(f"结果已保存到: {self.args.output}")
+
+
+    def _save_simple_detection_image(self, img_rgb, colonies):
+        """保存简单的检测结果图像"""
+        try:
+            import cv2
+            output_dir = Path(self.args.output)
+            
+            # 创建输出图像
+            result_img = img_rgb.copy()
+            
+            # 绘制每个菌落
+            for i, colony in enumerate(colonies):
+                if 'bbox' in colony:
+                    minr, minc, maxr, maxc = colony['bbox']
+                    # 绘制边界框
+                    cv2.rectangle(result_img, 
+                                (int(minc), int(minr)), 
+                                (int(maxc), int(maxr)), 
+                                (0, 255, 0), 2)
+                    
+                    # 添加标签
+                    label = colony.get('well_position', f'C{i}')
+                    cv2.putText(result_img, str(label), 
+                            (int(minc), int(minr-5)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, 
+                            (0, 255, 0), 1)
+            
+            # 保存图像
+            output_file = output_dir / "detection_result.jpg"
+            cv2.imwrite(str(output_file), cv2.cvtColor(result_img, cv2.COLOR_RGB2BGR))
+            logging.info(f"检测结果图已保存: {output_file}")
+            
+        except Exception as e:
+            logging.error(f"保存简单检测图像失败: {e}")
+
+
+    def _save_basic_images(self, img_rgb, colonies):
+        """保存最基本的图像（失败安全）"""
+        try:
+            import cv2
+            output_dir = Path(self.args.output)
+            
+            # 至少保存原始图像
+            original_path = output_dir / "original.jpg"
+            cv2.imwrite(str(original_path), cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR))
+            
+            # 保存带标记的图像
+            marked = img_rgb.copy()
+            for colony in colonies[:10]:  # 只标记前10个
+                if 'centroid' in colony:
+                    cy, cx = colony['centroid']
+                    cv2.circle(marked, (int(cx), int(cy)), 20, (255, 0, 0), 3)
+            
+            marked_path = output_dir / "marked.jpg"
+            cv2.imwrite(str(marked_path), cv2.cvtColor(marked, cv2.COLOR_RGB2BGR))
+            
+            logging.info(f"基本图像已保存到: {output_dir}")
+            
+        except Exception as e:
+            logging.error(f"保存基本图像失败: {e}")
+
+
+    def _generate_stats_file(self, analyzed_colonies):
+        """生成统计文件"""
+        try:
+            stats_path = Path(self.args.output) / f"stats_{self.args.orientation}.txt"
+            
+            with open(stats_path, 'w') as f:
+                f.write(f"Total colonies: {len(analyzed_colonies)}\n")
+                
+                if analyzed_colonies:
+                    areas = [c.get('area', 0) for c in analyzed_colonies]
+                    f.write(f"Average area: {np.mean(areas):.2f}\n")
+                    f.write(f"Area range: {min(areas):.2f} - {max(areas):.2f}\n")
+                    
+                    # 统计每个孔位的菌落
+                    well_counts = {}
+                    for c in analyzed_colonies:
+                        well = c.get('well_position', 'unmapped')
+                        well_counts[well] = well_counts.get(well, 0) + 1
+                    
+                    f.write(f"\nColonies per well:\n")
+                    for well, count in sorted(well_counts.items()):
+                        f.write(f"  {well}: {count}\n")
+            
+            logging.info(f"统计文件已保存: {stats_path}")
+            
+        except Exception as e:
+            logging.error(f"生成统计文件失败: {e}")
 
     def _generate_summary(self, analyzed_colonies):
         """生成结果摘要"""
@@ -1109,6 +1260,153 @@ class AnalysisPipeline:
             
         except Exception as e:
             logging.error(f"保存调试信息失败: {e}")
+    def _debug_colony_mapping(self, colonies, plate_grid, img_rgb):
+        """
+        调试菌落映射问题的专用方法
+        """
+        import cv2
+        import numpy as np
+        
+        logging.info(f"=== 开始菌落映射调试 ===")
+        logging.info(f"检测到的菌落数量: {len(colonies)}")
+        logging.info(f"网格孔位数量: {len(plate_grid)}")
+        
+        # 1. 检查图像和网格的坐标范围
+        height, width = img_rgb.shape[:2]
+        logging.info(f"图像尺寸: {height} x {width}")
+        
+        # 2. 检查网格的坐标范围
+        if plate_grid:
+            centers_y = [info["center"][0] for info in plate_grid.values()]
+            centers_x = [info["center"][1] for info in plate_grid.values()]
+            
+            logging.info(f"网格Y坐标范围: {min(centers_y):.1f} - {max(centers_y):.1f}")
+            logging.info(f"网格X坐标范围: {min(centers_x):.1f} - {max(centers_x):.1f}")
+            
+            # 检查几个关键孔位
+            key_wells = ["A1", "A12", "H1", "H12", "D6"]
+            for well_id in key_wells:
+                if well_id in plate_grid:
+                    info = plate_grid[well_id]
+                    cy, cx = info["center"]
+                    radius = info["search_radius"]
+                    logging.info(f"孔位 {well_id}: 中心=({cy:.1f}, {cx:.1f}), 搜索半径={radius:.1f}")
+        
+        # 3. 检查菌落的坐标范围
+        if colonies:
+            colony_centroids = [c.get("centroid", (0, 0)) for c in colonies if c.get("centroid")]
+            if colony_centroids:
+                colony_y = [c[0] for c in colony_centroids]
+                colony_x = [c[1] for c in colony_centroids]
+                
+                logging.info(f"菌落Y坐标范围: {min(colony_y):.1f} - {max(colony_y):.1f}")
+                logging.info(f"菌落X坐标范围: {min(colony_x):.1f} - {max(colony_x):.1f}")
+                
+                # 显示前5个菌落的坐标
+                for i, colony in enumerate(colonies[:5]):
+                    centroid = colony.get("centroid", (0, 0))
+                    area = colony.get("area", 0)
+                    logging.info(f"菌落 {i}: 中心=({centroid[0]:.1f}, {centroid[1]:.1f}), 面积={area:.0f}")
+        
+        # 4. 测试映射逻辑
+        if colonies and plate_grid:
+            logging.info("=== 测试映射逻辑 ===")
+            
+            test_colony = colonies[0]
+            centroid = test_colony.get("centroid", (0, 0))
+            cy, cx = centroid
+            
+            distances = []
+            for well_id, info in plate_grid.items():
+                wy, wx = info["center"]
+                distance = np.sqrt((cx - wx)**2 + (cy - wy)**2)
+                search_radius = info.get("search_radius", 50)
+                distances.append((well_id, distance, search_radius, distance < search_radius))
+            
+            distances.sort(key=lambda x: x[1])
+            
+            logging.info(f"测试菌落坐标: ({cy:.1f}, {cx:.1f})")
+            logging.info("最近的10个孔位:")
+            for well_id, dist, radius, within in distances[:10]:
+                status = "✓" if within else "✗"
+                logging.info(f"  {status} {well_id}: 距离={dist:.1f}, 搜索半径={radius:.1f}")
+        
+        # 5. 保存调试可视化
+        if self.args.debug:
+            self._save_mapping_debug_visualization(colonies, plate_grid, img_rgb)
+        
+        logging.info(f"=== 菌落映射调试结束 ===")
+
+    def _save_mapping_debug_visualization(self, colonies, plate_grid, img_rgb):
+        """保存映射调试可视化"""
+        try:
+            import cv2
+            from PIL import Image, ImageDraw, ImageFont
+            
+            # 创建调试图像
+            debug_img = img_rgb.copy()
+            pil_img = Image.fromarray(debug_img)
+            draw = ImageDraw.Draw(pil_img)
+            
+            try:
+                font = ImageFont.truetype("DejaVuSans.ttf", 12)
+            except:
+                font = None
+            
+            # 绘制网格中心点（蓝色）
+            for well_id, info in plate_grid.items():
+                wy, wx = info["center"]
+                radius = info.get("search_radius", 50)
+                
+                # 绘制搜索范围（淡蓝色圆圈）
+                draw.ellipse([wx-radius, wy-radius, wx+radius, wy+radius], 
+                            outline=(100, 150, 255), width=1)
+                
+                # 绘制中心点（蓝色小点）
+                draw.ellipse([wx-3, wy-3, wx+3, wy+3], fill=(0, 0, 255))
+                
+                # 标注孔位ID
+                if font and well_id in ["A1", "A12", "H1", "H12", "D6"]:  # 只标注关键孔位
+                    draw.text((wx+5, wy-15), well_id, fill=(0, 0, 255), font=font)
+            
+            # 绘制检测到的菌落（红色）
+            for i, colony in enumerate(colonies):
+                centroid = colony.get("centroid", (0, 0))
+                cy, cx = int(centroid[0]), int(centroid[1])
+                area = colony.get("area", 0)
+                
+                # 根据面积大小绘制不同大小的圆圈
+                size = max(5, min(25, int(np.sqrt(area) / 10)))
+                
+                # 绘制菌落位置（红色圆圈）
+                draw.ellipse([cx-size, cy-size, cx+size, cy+size], 
+                            outline=(255, 0, 0), width=2)
+                
+                # 标注菌落编号（前10个）
+                if i < 10 and font:
+                    draw.text((cx+size+2, cy-size), str(i), fill=(255, 0, 0), font=font)
+            
+            # 保存调试图像
+            debug_dir = self.result_manager.directories.get("debug", None)
+            if debug_dir:
+                debug_path = debug_dir / "colony_mapping_debug.png"
+                pil_img.save(debug_path)
+                logging.info(f"映射调试可视化已保存: {debug_path}")
+                
+                # 同时保存一个标注版本
+                annotated_path = debug_dir / "colony_mapping_annotated.png"
+                
+                # 在图像上添加图例
+                legend_y = 30
+                draw.text((10, legend_y), "蓝色圆圈: 网格孔位搜索范围", fill=(0, 0, 255), font=font)
+                draw.text((10, legend_y+20), "蓝色点: 孔位中心", fill=(0, 0, 255), font=font)
+                draw.text((10, legend_y+40), "红色圆圈: 检测到的菌落", fill=(255, 0, 0), font=font)
+                
+                pil_img.save(annotated_path)
+                logging.info(f"带注释的调试图像已保存: {annotated_path}")
+                
+        except Exception as e:
+            logging.error(f"保存映射调试可视化失败: {e}")
 
 
 
@@ -1116,8 +1414,7 @@ class AnalysisPipeline:
 
 
 def batch_medium_pipeline(img_paths: List[Path], output_folder: str, **kwargs):
-    """批量处理多培养基、多角度、多重复的图像"""
-    """批量处理指定的图像列表"""
+    """批量处理指定的图像列表 - 修复版本"""
     if not img_paths:
         logging.warning("没有图像需要处理")
         return
@@ -1130,7 +1427,6 @@ def batch_medium_pipeline(img_paths: List[Path], output_folder: str, **kwargs):
         sample_name, medium, orientation, replicate = parse_filename(img_path.stem)
         key = (sample_name, medium, replicate)
         groups[key][orientation] = img_path
-
 
     # 新增: 自动解析文件名并构造输出路径
     from pathlib import Path
@@ -1154,7 +1450,7 @@ def batch_medium_pipeline(img_paths: List[Path], output_folder: str, **kwargs):
     summary_data: Dict[Tuple[str, str], List[Dict[str, float]]] = defaultdict(list)
 
     start_all = time.time()
-    group_items = list(groups.items())
+    
     for (sample_name, medium, replicate), ori_dict in tqdm(
         groups.items(), desc="Batch processing", ncols=80
     ):
@@ -1163,46 +1459,80 @@ def batch_medium_pipeline(img_paths: List[Path], output_folder: str, **kwargs):
         try:
             # --- Use actual AnalysisPipeline for each orientation ---
             from argparse import Namespace
-            from .pipeline import AnalysisPipeline
+            
             output_paths: Dict[str, str] = {}
+            
             for orientation in ["front", "back"]:
                 if orientation in ori_dict:
                     image_path = str(ori_dict[orientation])
                     view_type = "Front" if orientation == "front" else "Back"
                     output_path = get_output_path(output_folder, image_path, replicate, view_type)
                     output_paths[orientation] = output_path
+                    
+                    # 创建完整的参数对象，包括所有必要的属性
                     args = Namespace(
+                        # 基本参数
                         image=image_path,
                         input=None,
                         input_dir=None,
                         output=output_path,
+                        
+                        # 检测参数
                         mode=kwargs.get('mode', 'hybrid'),
-                        model=kwargs.get('model', 'vit_h'),
-                        debug=kwargs.get('debug', False),
-                        verbose=kwargs.get('verbose', False),
-                        advanced=kwargs.get('advanced', False),
-                        config=None,
-                        orientation=orientation,
-                        medium=medium,
+                        model=kwargs.get('model', 'vit_b'),
                         device=kwargs.get('device', 'cuda'),
                         min_area=kwargs.get('min_area', 800),
+                        
+                        # 培养基和方向参数（重要！）
+                        medium=medium.lower(),  # 确保小写
+                        orientation=orientation,
+                        side=orientation,  # 有些地方使用side而不是orientation
+                        filter_medium=medium.lower(),  # 修复：添加缺失的属性
+                        
+                        # 96孔板参数
                         well_plate=kwargs.get('well_plate', True),
                         rows=kwargs.get('rows', 8),
                         cols=kwargs.get('cols', 12),
                         force_96plate_detection=kwargs.get('force_96plate_detection', False),
                         fallback_null_policy=kwargs.get('fallback_null_policy', 'fill'),
+                        
+                        # 分析参数
+                        advanced=kwargs.get('advanced', False),
+                        debug=kwargs.get('debug', False),
+                        verbose=kwargs.get('verbose', False),
+                        
+                        # 其他参数
+                        config=kwargs.get('config', None),
+                        sample_name=sample_name,
+                        replicate=replicate,
+                        
+                        # 离群值检测参数
+                        outlier_detection=kwargs.get('outlier_detection', False),
+                        outlier_metric=kwargs.get('outlier_metric', 'area'),
+                        outlier_threshold=kwargs.get('outlier_threshold', 3.0),
                     )
-                    args.rows = 8
-                    args.cols = 12
+                    
+                    # 运行分析管道
+                    logging.info(f"处理 {sample_name} {medium} {orientation} replicate {replicate}")
                     pipeline = AnalysisPipeline(args)
-                    pipeline.run()
-            # Automatically pair front/back results if both present
+                    results = pipeline.run()
+                    
+                    # 检查结果
+                    if results and results.get('total_colonies', 0) > 0:
+                        logging.info(f"成功检测到 {results['total_colonies']} 个菌落")
+                    else:
+                        logging.warning(f"未检测到菌落: {sample_name} {medium} {orientation}")
+                        
+            # 自动配对前后视图结果（如果两者都存在）
             if "front" in output_paths and "back" in output_paths:
                 try:
                     from colony_analysis.pairing import pair_colonies_across_views
-                    pair_colonies_across_views(Path(output_paths["front"]).parent)
+                    # 配对应该在replicate级别进行
+                    replicate_dir = Path(output_paths["front"]).parent
+                    pair_colonies_across_views(str(replicate_dir))
                 except Exception as e:
                     logging.error(f"配对前后视图失败: {e}")
+                    
             if "front" not in ori_dict and "back" not in ori_dict:
                 logging.warning(
                     f"{sample_name} replicate {replicate} 缺少 Front/Back 图像，跳过"
@@ -1212,78 +1542,85 @@ def batch_medium_pipeline(img_paths: List[Path], output_folder: str, **kwargs):
             logging.info(
                 f"已处理 {sample_name} replicate {replicate} ({medium.upper()}) - {elapsed:.2f}s"
             )
+            
         except Exception as e:
             logging.error(
-                f"处理失败: {sample_name} replicate {replicate}, 错误: {e}"
+                f"处理失败: {sample_name} {medium} replicate {replicate}, 错误: {e}"
             )
+            import traceback
+            logging.error(traceback.format_exc())
             continue
 
-        # 解析 stats 路径
-        # 需要和 get_output_path 保持一致
-        # 构造 base_dir = output/Lib96_Ctrl/MMM/20250401_09191796/replicate_01
-        stats_base_dir = None
+        # 生成统计文件
         try:
-            # 任选 front/back 中一个 image_path
+            stats_base_dir = None
+            # 构造统计文件路径
             chosen_img = None
             for orientation in ["front", "back"]:
                 if orientation in ori_dict:
                     chosen_img = str(ori_dict[orientation])
                     break
-            if not chosen_img:
-                continue
-            filename = Path(chosen_img).stem
-            match = re.match(r"(?P<group>Lib96_\w+)_@(?P<medium>\w+)_(?P<view>Back|Front)(?P<dateid>\d+)", filename)
-            if not match:
-                continue
-            group = match.group("group")
-            medium_str = match.group("medium")
-            dateid = match.group("dateid")
-            stats_base_dir = Path(output_folder) / group / medium_str / dateid / f"replicate_{replicate}"
-        except Exception:
-            continue
+                    
+            if chosen_img:
+                filename = Path(chosen_img).stem
+                match = re.match(r"(?P<group>Lib96_\w+)_@(?P<medium>\w+)_(?P<view>Back|Front)(?P<dateid>\d+)", filename)
+                if match:
+                    group = match.group("group")
+                    medium_str = match.group("medium")
+                    dateid = match.group("dateid")
+                    stats_base_dir = Path(output_folder) / group / medium_str / dateid / f"replicate_{replicate}"
+                    
+                    # 合并前后统计
+                    front_stats = stats_base_dir / "Front" / "stats_Front.txt"
+                    back_stats = stats_base_dir / "Back" / "stats_Back.txt"
+                    combined_folder = stats_base_dir / "combined"
+                    combined_folder.mkdir(parents=True, exist_ok=True)
+                    
+                    if front_stats.exists() and back_stats.exists():
+                        metrics = combine_metrics(str(front_stats), str(back_stats))
+                        combined_path = combined_folder / "combined_stats.txt"
+                        with open(combined_path, "w") as f:
+                            for k, v in metrics.items():
+                                f.write(f"{k}: {v}\n")
 
-        front_stats = stats_base_dir / "Front" / "stats_Front.txt"
-        back_stats = stats_base_dir / "Back" / "stats_Back.txt"
-        combined_folder = stats_base_dir / "combined"
-        combined_folder.mkdir(parents=True, exist_ok=True)
-        if front_stats.exists() and back_stats.exists():
-            metrics = combine_metrics(str(front_stats), str(back_stats))
-            combined_path = combined_folder / "combined_stats.txt"
-            with open(combined_path, "w") as f:
-                for k, v in metrics.items():
-                    f.write(f"{k}: {v}\n")
+                        metrics_record = {"replicate": replicate}
+                        metrics_record.update(metrics)
+                        summary_data[(group, medium_str)].append(metrics_record)
+                        
+        except Exception as e:
+            logging.error(f"生成统计文件失败: {e}")
 
-            metrics_record = {"replicate": replicate}
-            metrics_record.update(metrics)
-            summary_data[(group, medium_str)].append(metrics_record)
-
+    # 生成汇总报告
     import csv
     import statistics
 
     for (group, medium), records in summary_data.items():
         if not records:
             continue
-        # dateid 不唯一，summary 聚合到 group/medium/summary
-        summary_dir = (
-            Path(output_folder) / group / medium / "summary"
-        )
+            
+        summary_dir = Path(output_folder) / group / medium / "summary"
         summary_dir.mkdir(parents=True, exist_ok=True)
 
         keys = [k for k in records[0].keys() if k != "replicate"]
         csv_path = summary_dir / "all_replicates.csv"
-        with open(csv_path, "w", newline="") as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=["replicate"] + keys)
-            writer.writeheader()
-            for rec in records:
-                writer.writerow(rec)
+        
+        try:
+            with open(csv_path, "w", newline="") as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=["replicate"] + keys)
+                writer.writeheader()
+                for rec in records:
+                    writer.writerow(rec)
 
-        stats_path = summary_dir / "summary_stats.txt"
-        with open(stats_path, "w") as f:
-            for key in keys:
-                values = [rec[key] for rec in records if key in rec]
-                mean = sum(values) / len(values)
-                std = statistics.stdev(values) if len(values) > 1 else 0.0
-                f.write(f"{key}: mean={mean}, std={std}\n")
+            stats_path = summary_dir / "summary_stats.txt"
+            with open(stats_path, "w") as f:
+                for key in keys:
+                    values = [rec[key] for rec in records if key in rec]
+                    if values:
+                        mean = sum(values) / len(values)
+                        std = statistics.stdev(values) if len(values) > 1 else 0.0
+                        f.write(f"{key}: mean={mean}, std={std}\n")
+        except Exception as e:
+            logging.error(f"生成汇总报告失败: {e}")
 
     total_elapsed = time.time() - start_all
     logging.info(f"批量处理完成，总耗时 {total_elapsed:.2f}s")
@@ -1294,153 +1631,7 @@ def batch_medium_pipeline(img_paths: List[Path], output_folder: str, **kwargs):
 # 添加到 colony_analysis/pipeline.py 中的调试方法
 # ============================================================================
 
-def _debug_colony_mapping(self, colonies, plate_grid, img_rgb):
-    """
-    调试菌落映射问题的专用方法
-    """
-    import cv2
-    import numpy as np
-    
-    logging.info(f"=== 开始菌落映射调试 ===")
-    logging.info(f"检测到的菌落数量: {len(colonies)}")
-    logging.info(f"网格孔位数量: {len(plate_grid)}")
-    
-    # 1. 检查图像和网格的坐标范围
-    height, width = img_rgb.shape[:2]
-    logging.info(f"图像尺寸: {height} x {width}")
-    
-    # 2. 检查网格的坐标范围
-    if plate_grid:
-        centers_y = [info["center"][0] for info in plate_grid.values()]
-        centers_x = [info["center"][1] for info in plate_grid.values()]
-        
-        logging.info(f"网格Y坐标范围: {min(centers_y):.1f} - {max(centers_y):.1f}")
-        logging.info(f"网格X坐标范围: {min(centers_x):.1f} - {max(centers_x):.1f}")
-        
-        # 检查几个关键孔位
-        key_wells = ["A1", "A12", "H1", "H12", "D6"]
-        for well_id in key_wells:
-            if well_id in plate_grid:
-                info = plate_grid[well_id]
-                cy, cx = info["center"]
-                radius = info["search_radius"]
-                logging.info(f"孔位 {well_id}: 中心=({cy:.1f}, {cx:.1f}), 搜索半径={radius:.1f}")
-    
-    # 3. 检查菌落的坐标范围
-    if colonies:
-        colony_centroids = [c.get("centroid", (0, 0)) for c in colonies if c.get("centroid")]
-        if colony_centroids:
-            colony_y = [c[0] for c in colony_centroids]
-            colony_x = [c[1] for c in colony_centroids]
-            
-            logging.info(f"菌落Y坐标范围: {min(colony_y):.1f} - {max(colony_y):.1f}")
-            logging.info(f"菌落X坐标范围: {min(colony_x):.1f} - {max(colony_x):.1f}")
-            
-            # 显示前5个菌落的坐标
-            for i, colony in enumerate(colonies[:5]):
-                centroid = colony.get("centroid", (0, 0))
-                area = colony.get("area", 0)
-                logging.info(f"菌落 {i}: 中心=({centroid[0]:.1f}, {centroid[1]:.1f}), 面积={area:.0f}")
-    
-    # 4. 测试映射逻辑
-    if colonies and plate_grid:
-        logging.info("=== 测试映射逻辑 ===")
-        
-        test_colony = colonies[0]
-        centroid = test_colony.get("centroid", (0, 0))
-        cy, cx = centroid
-        
-        distances = []
-        for well_id, info in plate_grid.items():
-            wy, wx = info["center"]
-            distance = np.sqrt((cx - wx)**2 + (cy - wy)**2)
-            search_radius = info.get("search_radius", 50)
-            distances.append((well_id, distance, search_radius, distance < search_radius))
-        
-        distances.sort(key=lambda x: x[1])
-        
-        logging.info(f"测试菌落坐标: ({cy:.1f}, {cx:.1f})")
-        logging.info("最近的10个孔位:")
-        for well_id, dist, radius, within in distances[:10]:
-            status = "✓" if within else "✗"
-            logging.info(f"  {status} {well_id}: 距离={dist:.1f}, 搜索半径={radius:.1f}")
-    
-    # 5. 保存调试可视化
-    if self.args.debug:
-        self._save_mapping_debug_visualization(colonies, plate_grid, img_rgb)
-    
-    logging.info(f"=== 菌落映射调试结束 ===")
 
-def _save_mapping_debug_visualization(self, colonies, plate_grid, img_rgb):
-    """保存映射调试可视化"""
-    try:
-        import cv2
-        from PIL import Image, ImageDraw, ImageFont
-        
-        # 创建调试图像
-        debug_img = img_rgb.copy()
-        pil_img = Image.fromarray(debug_img)
-        draw = ImageDraw.Draw(pil_img)
-        
-        try:
-            font = ImageFont.truetype("DejaVuSans.ttf", 12)
-        except:
-            font = None
-        
-        # 绘制网格中心点（蓝色）
-        for well_id, info in plate_grid.items():
-            wy, wx = info["center"]
-            radius = info.get("search_radius", 50)
-            
-            # 绘制搜索范围（淡蓝色圆圈）
-            draw.ellipse([wx-radius, wy-radius, wx+radius, wy+radius], 
-                        outline=(100, 150, 255), width=1)
-            
-            # 绘制中心点（蓝色小点）
-            draw.ellipse([wx-3, wy-3, wx+3, wy+3], fill=(0, 0, 255))
-            
-            # 标注孔位ID
-            if font and well_id in ["A1", "A12", "H1", "H12", "D6"]:  # 只标注关键孔位
-                draw.text((wx+5, wy-15), well_id, fill=(0, 0, 255), font=font)
-        
-        # 绘制检测到的菌落（红色）
-        for i, colony in enumerate(colonies):
-            centroid = colony.get("centroid", (0, 0))
-            cy, cx = int(centroid[0]), int(centroid[1])
-            area = colony.get("area", 0)
-            
-            # 根据面积大小绘制不同大小的圆圈
-            size = max(5, min(25, int(np.sqrt(area) / 10)))
-            
-            # 绘制菌落位置（红色圆圈）
-            draw.ellipse([cx-size, cy-size, cx+size, cy+size], 
-                        outline=(255, 0, 0), width=2)
-            
-            # 标注菌落编号（前10个）
-            if i < 10 and font:
-                draw.text((cx+size+2, cy-size), str(i), fill=(255, 0, 0), font=font)
-        
-        # 保存调试图像
-        debug_dir = self.result_manager.directories.get("debug", None)
-        if debug_dir:
-            debug_path = debug_dir / "colony_mapping_debug.png"
-            pil_img.save(debug_path)
-            logging.info(f"映射调试可视化已保存: {debug_path}")
-            
-            # 同时保存一个标注版本
-            annotated_path = debug_dir / "colony_mapping_annotated.png"
-            
-            # 在图像上添加图例
-            legend_y = 30
-            draw.text((10, legend_y), "蓝色圆圈: 网格孔位搜索范围", fill=(0, 0, 255), font=font)
-            draw.text((10, legend_y+20), "蓝色点: 孔位中心", fill=(0, 0, 255), font=font)
-            draw.text((10, legend_y+40), "红色圆圈: 检测到的菌落", fill=(255, 0, 0), font=font)
-            
-            pil_img.save(annotated_path)
-            logging.info(f"带注释的调试图像已保存: {annotated_path}")
-            
-    except Exception as e:
-        logging.error(f"保存映射调试可视化失败: {e}")
 
 
 
