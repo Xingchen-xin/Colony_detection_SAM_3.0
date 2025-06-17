@@ -281,23 +281,35 @@ class Visualizer:
         for i, (mask, color) in enumerate(zip(masks, colors)):
             if mask is None or mask.size == 0:
                 continue
-                
+
+            # 如果掩码尺寸与原图不同，尝试根据 bbox 还原到全尺寸
+            if mask.shape[:2] != img_rgb.shape[:2]:
+                full_mask = np.zeros(img_rgb.shape[:2], dtype=mask.dtype)
+                if colony_data and i < len(colony_data) and 'bbox' in colony_data[i]:
+                    minr, minc, maxr, maxc = colony_data[i]['bbox']
+                    h, w = mask.shape[:2]
+                    full_mask[minr:minr+h, minc:minc+w] = mask
+                else:
+                    full_mask = cv2.resize(mask, (img_rgb.shape[1], img_rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
+            else:
+                full_mask = mask
+
             # 创建彩色掩码
             colored_mask = np.zeros_like(img_rgb)
             for c in range(3):
-                colored_mask[:, :, c] = mask * color[c]
-            
+                colored_mask[:, :, c] = full_mask * color[c]
+
             # 半透明叠加
             alpha = 0.4
-            mask_indices = mask > 0
+            mask_indices = full_mask > 0
             overlay[mask_indices] = (
-                overlay[mask_indices] * (1 - alpha) + 
+                overlay[mask_indices] * (1 - alpha) +
                 colored_mask[mask_indices] * alpha
             ).astype(np.uint8)
-            
+
             # 绘制轮廓
             contours, _ = cv2.findContours(
-                roi_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                full_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
             cv2.drawContours(overlay, contours, -1, color, 2)
             
@@ -487,23 +499,34 @@ class ImprovedVisualizer:
         for i, (mask, color) in enumerate(zip(masks, colors)):
             if mask is None or mask.size == 0:
                 continue
-                
+
+            if mask.shape[:2] != img_rgb.shape[:2]:
+                full_mask = np.zeros(img_rgb.shape[:2], dtype=mask.dtype)
+                if colony_data and i < len(colony_data) and 'bbox' in colony_data[i]:
+                    minr, minc, maxr, maxc = colony_data[i]['bbox']
+                    h, w = mask.shape[:2]
+                    full_mask[minr:minr+h, minc:minc+w] = mask
+                else:
+                    full_mask = cv2.resize(mask, (img_rgb.shape[1], img_rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
+            else:
+                full_mask = mask
+
             # 创建彩色掩码
             colored_mask = np.zeros_like(img_rgb)
             for c in range(3):
-                colored_mask[:, :, c] = mask * color[c]
-            
+                colored_mask[:, :, c] = full_mask * color[c]
+
             # 半透明叠加
             alpha = 0.4
-            mask_indices = mask > 0
+            mask_indices = full_mask > 0
             overlay[mask_indices] = (
-                overlay[mask_indices] * (1 - alpha) + 
+                overlay[mask_indices] * (1 - alpha) +
                 colored_mask[mask_indices] * alpha
             ).astype(np.uint8)
-            
+
             # 绘制轮廓
             contours, _ = cv2.findContours(
-                roi_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                full_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
             cv2.drawContours(overlay, contours, -1, color, 2)
             
