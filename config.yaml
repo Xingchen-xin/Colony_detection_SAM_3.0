@@ -30,7 +30,7 @@ detection:
   sort_by_quality: true
   min_quality_score: 0.2
   min_colonies_expected: 30
-  max_mapping_distance: 0.5
+  max_mapping_distance: 2.0
   supplement_score_threshold: 0.5
   edge_margin_ratio: 0.08
   cross_boundary_overlap_threshold: 0.1

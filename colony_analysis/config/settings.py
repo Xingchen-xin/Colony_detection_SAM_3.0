@@ -46,7 +46,7 @@ class DetectionConfig:
     min_quality_score: float = 0.3
     # Hybrid模式参数
     min_colonies_expected: int = 30
-    max_mapping_distance: float = 0.5
+    max_mapping_distance: float = 2.0
     supplement_score_threshold: float = 0.5
     edge_margin_ratio: float = 0.08
     # 跨界处理参数

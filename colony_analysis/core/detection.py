@@ -56,7 +56,7 @@ class DetectionConfig:
 
     # Hybrid模式参数
     min_colonies_expected: int = 30  # 预期最少菌落数
-    max_mapping_distance: float = 0.5  # 最大映射距离（相对于孔位大小）
+    max_mapping_distance: float = 2.0  # 最大映射距离（相对于孔位大小）
     supplement_score_threshold: float = 0.5  # 补充检测的分数阈值
     edge_margin_ratio: float = 0.08  # 边缘边距比例
 
