@@ -115,14 +115,46 @@ class Visualizer:
             bbox = colony.get("bbox", None)
             if bbox is None:
                 continue
+
             minr, minc, maxr, maxc = bbox
+            img_h, img_w = annotated_img.shape[:2]
+
+            h = maxr - minr
+            w = maxc - minc
+            if h <= 0 or w <= 0 or minr >= img_h or minc >= img_w:
+                logging.warning(
+                    f"跳过无效 bbox (h={h}, w={w}) for colony {i}: {bbox}"
+                )
+                continue
+
+            # 确保坐标在图像范围内
+            minr = max(0, minr)
+            minc = max(0, minc)
+            maxr = min(img_h, maxr)
+            maxc = min(img_w, maxc)
+
             roi = annotated_img[minr:maxr, minc:maxc]
 
             # 生成与 ROI 同尺寸的彩色层
             b, g, r = colors[i]
             colored_layer = np.zeros_like(roi, dtype=np.uint8)
-            # 只取 ROI 对应的掩码，保证尺寸匹配
-            roi_mask = mask[minr:maxr, minc:maxc].astype(bool)
+
+            # 根据掩码形状决定如何裁剪
+            if mask.shape[:2] == roi.shape[:2]:
+                roi_mask = mask.astype(bool)
+            else:
+                # 掩码可能是全尺寸，需要根据 bbox 取局部区域
+                rel_minr = max(0, minr - bbox[0])
+                rel_minc = max(0, minc - bbox[1])
+                rel_maxr = rel_minr + roi.shape[0]
+                rel_maxc = rel_minc + roi.shape[1]
+                roi_mask = mask[rel_minr:rel_maxr, rel_minc:rel_maxc].astype(bool)
+                if roi_mask.shape[:2] != roi.shape[:2]:
+                    logging.warning(
+                        f"掩码尺寸 {mask.shape} 与 ROI {roi.shape} 不匹配，跳过 colony {i}"
+                    )
+                    continue
+
             colored_layer[:, :] = (b, g, r)
 
             # 半透明融合
