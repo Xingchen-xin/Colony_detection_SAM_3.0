@@ -1,0 +1,19 @@
+=== 菌落分析报告 ===
+生成时间: 2025-06-18 16:48:50
+
+检测到的菌落总数: 106
+平均面积: 5279.38
+面积范围: 3848.45 - 10193.00
+检测模式: hybrid
+SAM模型: vit_h
+
+=== 表型分布 ===
+development_state:
+  substrate_mycelium: 106
+metabolite_production:
+  none: 86
+  actinorhodin: 9
+  prodigiosin: 11
+colony_morphology:
+  wrinkled: 12
+  smooth: 94
