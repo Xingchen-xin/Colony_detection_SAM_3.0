@@ -9,6 +9,7 @@ detection:
   min_colony_area: 800
   max_colony_area: 50000
   expand_pixels: 2
+  bbox_expand_ratio: 0.01
   adaptive_gradient_thresh: 20
   adaptive_expand_iters: 25
   merge_overlapping: true

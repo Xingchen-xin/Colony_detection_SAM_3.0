@@ -26,6 +26,7 @@ class DetectionConfig:
     min_colony_area: int = 400  # 更低阈值以允许较小/稀疏菌落合并为整体
     max_colony_area: int = 50000
     expand_pixels: int = 2
+    bbox_expand_ratio: float = 0.01  # 边界框按图像尺寸扩展的比例
     adaptive_gradient_thresh: int = 15  # 允许在弱边缘区域扩展
     adaptive_expand_iters: int = 35     # 增强区域聚合能力，尤其适合零散孢子
     merge_overlapping: bool = True
@@ -1253,18 +1254,25 @@ class ColonyDetector:
     ) -> Dict:
         """从图像和掩码中提取菌落数据"""
         # 计算边界框
-        y_indices, x_indices = np.where(mask)
+        y_indices, x_indices = np.where(mask > 0)
         if len(y_indices) == 0:
             return None
 
-        minr, minc = np.min(y_indices), np.min(x_indices)
-        maxr, maxc = np.max(y_indices) + 1, np.max(x_indices) + 1
-        # 对边界框进行微调：向外扩展2像素并限制在图像范围内
+        minr, minc = int(np.min(y_indices)), int(np.min(x_indices))
+        maxr, maxc = int(np.max(y_indices)) + 1, int(np.max(x_indices)) + 1
+        # 根据图像尺寸按比例扩展边界框并限制在图像范围内
         height, width = img.shape[:2]
-        minr = max(0, minr - 2)
-        minc = max(0, minc - 2)
-        maxr = min(height, maxr + 2)
-        maxc = min(width, maxc + 2)
+        pad = max(1, int(min(height, width) * self.config.bbox_expand_ratio))
+        minr = max(0, minr - pad)
+        minc = max(0, minc - pad)
+        maxr = min(height, maxr + pad)
+        maxc = min(width, maxc + pad)
+
+        if maxr <= minr or maxc <= minc:
+            logging.warning(
+                f"Skip invalid bbox for {colony_id}: {(minr, minc, maxr, maxc)}"
+            )
+            return None
 
         # 提取菌落图像和掩码
         colony_img = img[minr:maxr, minc:maxc].copy()

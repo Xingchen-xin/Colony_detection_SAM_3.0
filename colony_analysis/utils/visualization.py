@@ -319,11 +319,33 @@ class Visualizer:
                 full_mask = np.zeros(img_rgb.shape[:2], dtype=mask.dtype)
                 if colony_data and i < len(colony_data) and 'bbox' in colony_data[i]:
                     minr, minc, maxr, maxc = colony_data[i]['bbox']
+                    img_h, img_w = img_rgb.shape[:2]
                     h, w = mask.shape[:2]
-                    full_mask[minr:minr+h, minc:minc+w] = mask
+                    exp_h, exp_w = maxr - minr, maxc - minc
+                    logging.debug(
+                        f"[overlay] colony {i}: mask.shape={(h, w)}, bbox_size={(exp_h, exp_w)}"
+                    )
+                    if (h, w) != (exp_h, exp_w):
+                        logging.warning(
+                            f"colony {i} bbox {exp_h, exp_w} \u2260 mask.shape {(h, w)}, adjusting"
+                        )
+                        maxr = minr + h
+                        maxc = minc + w
+                    end_r = min(img_h, maxr)
+                    end_c = min(img_w, maxc)
+                    if end_r <= minr or end_c <= minc:
+                        logging.warning(
+                            f"skip invalid bbox for colony {i}: {(minr, minc, maxr, maxc)}"
+                        )
+                        continue
+                    full_mask[minr:end_r, minc:end_c] = mask[: end_r - minr, : end_c - minc]
                 else:
                     orig_dtype = mask.dtype
-                    resized = cv2.resize(mask.astype(np.uint8), (img_rgb.shape[1], img_rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
+                    resized = cv2.resize(
+                        mask.astype(np.uint8),
+                        (img_rgb.shape[1], img_rgb.shape[0]),
+                        interpolation=cv2.INTER_NEAREST,
+                    )
                     full_mask = resized.astype(orig_dtype) if orig_dtype == bool else resized
             else:
                 full_mask = mask
@@ -538,11 +560,33 @@ class ImprovedVisualizer:
                 full_mask = np.zeros(img_rgb.shape[:2], dtype=mask.dtype)
                 if colony_data and i < len(colony_data) and 'bbox' in colony_data[i]:
                     minr, minc, maxr, maxc = colony_data[i]['bbox']
+                    img_h, img_w = img_rgb.shape[:2]
                     h, w = mask.shape[:2]
-                    full_mask[minr:minr+h, minc:minc+w] = mask
+                    exp_h, exp_w = maxr - minr, maxc - minc
+                    logging.debug(
+                        f"[overlay] colony {i}: mask.shape={(h, w)}, bbox_size={(exp_h, exp_w)}"
+                    )
+                    if (h, w) != (exp_h, exp_w):
+                        logging.warning(
+                            f"colony {i} bbox {exp_h, exp_w} \u2260 mask.shape {(h, w)}, adjusting"
+                        )
+                        maxr = minr + h
+                        maxc = minc + w
+                    end_r = min(img_h, maxr)
+                    end_c = min(img_w, maxc)
+                    if end_r <= minr or end_c <= minc:
+                        logging.warning(
+                            f"skip invalid bbox for colony {i}: {(minr, minc, maxr, maxc)}"
+                        )
+                        continue
+                    full_mask[minr:end_r, minc:end_c] = mask[: end_r - minr, : end_c - minc]
                 else:
                     orig_dtype = mask.dtype
-                    resized = cv2.resize(mask.astype(np.uint8), (img_rgb.shape[1], img_rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
+                    resized = cv2.resize(
+                        mask.astype(np.uint8),
+                        (img_rgb.shape[1], img_rgb.shape[0]),
+                        interpolation=cv2.INTER_NEAREST,
+                    )
                     full_mask = resized.astype(orig_dtype) if orig_dtype == bool else resized
             else:
                 full_mask = mask
