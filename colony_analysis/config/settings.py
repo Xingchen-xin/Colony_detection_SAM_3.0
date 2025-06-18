@@ -21,6 +21,7 @@ class DetectionConfig:
     min_colony_area: int = 500
     max_colony_area: int = 30000
     expand_pixels: int = 2
+    bbox_expand_ratio: float = 0.01
     adaptive_gradient_thresh: int = 50
     adaptive_expand_iters: int = 7
     merge_overlapping: bool = True
