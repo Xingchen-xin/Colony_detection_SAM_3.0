@@ -319,6 +319,14 @@ class Visualizer:
                 full_mask = np.zeros(img_rgb.shape[:2], dtype=mask.dtype)
                 if colony_data and i < len(colony_data) and 'bbox' in colony_data[i]:
                     minr, minc, maxr, maxc = colony_data[i]['bbox']
+                    # 自动修正潜在的 (x1, y1, x2, y2) 顺序错误
+                    if maxr <= minr or maxc <= minc:
+                        alt_minr, alt_minc, alt_maxr, alt_maxc = minc, minr, maxc, maxr
+                        if alt_maxr > alt_minr and alt_maxc > alt_minc:
+                            logging.warning(
+                                f"auto-fixing bbox order for colony {i}: {(minr, minc, maxr, maxc)}"
+                            )
+                            minr, minc, maxr, maxc = alt_minr, alt_minc, alt_maxr, alt_maxc
                     img_h, img_w = img_rgb.shape[:2]
                     h, w = mask.shape[:2]
                     exp_h, exp_w = maxr - minr, maxc - minc
@@ -560,6 +568,13 @@ class ImprovedVisualizer:
                 full_mask = np.zeros(img_rgb.shape[:2], dtype=mask.dtype)
                 if colony_data and i < len(colony_data) and 'bbox' in colony_data[i]:
                     minr, minc, maxr, maxc = colony_data[i]['bbox']
+                    if maxr <= minr or maxc <= minc:
+                        alt_minr, alt_minc, alt_maxr, alt_maxc = minc, minr, maxc, maxr
+                        if alt_maxr > alt_minr and alt_maxc > alt_minc:
+                            logging.warning(
+                                f"auto-fixing bbox order for colony {i}: {(minr, minc, maxr, maxc)}"
+                            )
+                            minr, minc, maxr, maxc = alt_minr, alt_minc, alt_maxr, alt_maxc
                     img_h, img_w = img_rgb.shape[:2]
                     h, w = mask.shape[:2]
                     exp_h, exp_w = maxr - minr, maxc - minc
