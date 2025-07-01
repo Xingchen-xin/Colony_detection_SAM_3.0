@@ -89,9 +89,9 @@ data/
 *.tif
 *.tiff
 *.bmp
+Image_input/*.tif
 !examples/images/.gitkeep
-!Image_input/
-!Image_input/**
+!Image_input/*.jpg
 
 # 测试覆盖率报告
 htmlcov/

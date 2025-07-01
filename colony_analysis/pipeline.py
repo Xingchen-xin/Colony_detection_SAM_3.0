@@ -8,9 +8,9 @@ import time
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import json
-
+from tifffile import imread
 from tqdm import tqdm
-
+import torch
 import cv2
 import numpy as np
 from colony_analysis.config.config_loader import ConfigLoader
@@ -140,12 +140,14 @@ class AnalysisPipeline:
 
     def __init__(self, args):
         """初始化分析管道 - 修复版本"""
+
         # 确保device属性存在
         if not hasattr(args, "device"):
             args.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         self.args = args
-
+        self.use_cp_sam_masks = getattr(args, "use_cp_sam_masks", False)
+        self.cp_sam_masks_dir = getattr(args, "cp_sam_masks_dir", None)
         # 加载并初始化配置管理器
         self.config = ConfigManager(self.args.config)
         self.config.update_from_args(self.args)
@@ -341,7 +343,10 @@ class AnalysisPipeline:
             # —— 动态自校准 96孔网格（基于初次自动检测的质心分布） —— 
             if getattr(self.args, "force_96plate_detection", False):
                 # 初次自动检测获取质心
-                auto_cols = self.detector.detect(img_rgb, mode="auto")
+                if self.use_cp_sam_masks and self.cp_sam_masks_dir:
+                    auto_cols = self._load_precomputed_colonies(img_rgb, image_path)
+                else:
+                    auto_cols = self.detector.detect(img_rgb, mode="auto")
                 centroids = [c.get("centroid") for c in auto_cols if c.get("centroid") is not None]
                 if centroids:
                     self._self_calibrate_grid(centroids, rows, cols)
@@ -527,7 +532,10 @@ class AnalysisPipeline:
             
             # Auto检测补充
             logging.info("Running auto-detect for additional colonies")
-            auto_cols = self.detector.detect(img_rgb, mode="auto")
+            if self.use_cp_sam_masks and self.cp_sam_masks_dir:
+                colonies = self._load_precomputed_colonies(img_rgb, image_path)
+            else:
+                auto_cols = self.detector.detect(img_rgb, mode="auto")
             logging.info(f"Auto mode found {len(auto_cols)} colonies")
             
             # 智能合并auto检测结果
@@ -550,7 +558,10 @@ class AnalysisPipeline:
                     colonies.append(auto_col)
         else:
             # 其他模式直接检测
-            colonies.extend(self.detector.detect(img_rgb, mode=self.args.mode))
+            if self.use_cp_sam_masks and self.cp_sam_masks_dir:
+                colonies = self._load_precomputed_colonies(img_rgb, image_path)
+            else:
+                colonies.extend(self.detector.detect(img_rgb, mode=self.args.mode))
         
         logging.info(f"Total detected colonies before mapping: {len(colonies)}")
         
@@ -954,7 +965,10 @@ class AnalysisPipeline:
             # 在调用检测前，先验证配置
             self._validate_detection_params()
             # 直接使用现有的ColonyDetector，不要重新实现
-            colonies = self.detector.detect(img_rgb, mode=self.args.mode)
+            if self.use_cp_sam_masks and self.cp_sam_masks_dir:
+                colonies = self._load_precomputed_colonies(img_rgb, image_path)
+            else:
+                colonies = self.detector.detect(img_rgb, mode=self.args.mode)
             logging.info(f"检测完成，发现 {len(colonies)} 个菌落")
             
             # 验证返回的数据
@@ -1407,6 +1421,19 @@ class AnalysisPipeline:
                 
         except Exception as e:
             logging.error(f"保存映射调试可视化失败: {e}")
+
+    def _load_precomputed_colonies(self, img, image_path):
+        base = os.path.splitext(os.path.basename(self.args.image or image_path))[0]
+        maskfile = os.path.join(self.cp_sam_masks_dir, f"{base}_cp_masks.tif")
+        stack = imread(maskfile)
+        cols = []
+        for lab in np.unique(stack):
+            if lab==0: continue
+            m = (stack==lab).astype(np.uint8)
+            cd = self.detector._extract_colony_data(img, m, f"colony_{lab}", "cp_sam")
+            cd["sam_score"] = 1.0
+            cols.append(cd)
+        return cols
 
 
 

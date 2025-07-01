@@ -76,8 +76,8 @@ def parse_arguments():
 
     # 输入/输出
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--image", "-i", nargs="+", help="输入图像路径，可指定多个")
-    group.add_argument("--input-dir", "-I", help="包含待分析图像的目录")
+    group.add_argument("--image", "-i","--input", nargs="+", help="输入图像路径，可指定多个")
+    group.add_argument("--input-dir", "-I","--dir" help="包含待分析图像的目录")
     parser.add_argument(
         "--output", "-o", default="output", help="输出目录 (默认: output)"
     )
@@ -144,6 +144,20 @@ def parse_arguments():
     parser.add_argument("--medium", help="培养基名称 (单图像模式必需)")
     parser.add_argument("--side", choices=["front", "back"], help="图像正面或背面 (单图像模式必需)")
     parser.add_argument("--device", choices=["cpu","cuda"], default="cuda", help="运行设备")
+
+    # 解析参数
+    parser.add_argument(
+        "--use_cp_sam_masks",
+        action="store_true",
+        help="Use precomputed Cellpose-SAM masks (*.tif) instead of running SAMModel"
+    )
+    parser.add_argument(
+        "--cp_sam_masks_dir",
+        type=str,
+        default=None,
+        help="Directory containing your *_cp_masks.tif mask files"
+    )
+
     args = parser.parse_args()
     # Require medium and side only in single-image mode
     if args.image and (args.medium is None or args.side is None):
