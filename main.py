@@ -77,7 +77,7 @@ def parse_arguments():
     # 输入/输出
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--image", "-i","--input", nargs="+", help="输入图像路径，可指定多个")
-    group.add_argument("--input-dir", "-I","--dir" help="包含待分析图像的目录")
+    group.add_argument("--input-dir", "-I","--dir", help="包含待分析图像的目录")
     parser.add_argument(
         "--output", "-o", default="output", help="输出目录 (默认: output)"
     )
@@ -203,6 +203,107 @@ def setup_logging(verbose: bool = False, log_level: str = "INFO") -> None:
 
     logging.info(f"日志记录到文件: {log_file}")
 
+def log_command_line_info(args):
+    """记录命令行信息到日志"""
+    
+    # 1. 记录原始命令行
+    original_command = ' '.join(sys.argv)
+    logging.info("=" * 80)
+    logging.info("🚀 Colony Detection SAM 2.0 启动")
+    logging.info("=" * 80)
+    logging.info(f"📝 执行命令: {original_command}")
+    
+    # 2. 记录解析后的参数（格式化显示）
+    logging.info("📋 解析后的参数:")
+    args_dict = vars(args)
+    
+    # 按类别分组显示参数
+    param_groups = {
+        "输入/输出": ["image", "input_dir", "output"],
+        "检测参数": ["mode", "model", "device", "min_area"],
+        "96孔板参数": ["well_plate", "rows", "cols", "force_96plate_detection", "fallback_null_policy"],
+        "分析参数": ["advanced", "debug", "verbose", "outlier_detection"],
+        "过滤参数": ["filter_medium", "filter_side", "filter_sample"],
+        "培养基参数": ["medium", "side"],
+        "配置参数": ["config", "log_level"]
+    }
+    
+    for group_name, param_names in param_groups.items():
+        group_params = {k: v for k, v in args_dict.items() if k in param_names and v is not None}
+        if group_params:  # 只显示有值的参数组
+            logging.info(f"  {group_name}:")
+            for key, value in group_params.items():
+                logging.info(f"    {key}: {value}")
+    
+    # 3. 记录其他重要信息
+    logging.info("🖥️  系统信息:")
+    logging.info(f"    Python版本: {sys.version}")
+    logging.info(f"    工作目录: {os.getcwd()}")
+    logging.info(f"    启动时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # 4. 检查关键文件/目录
+    logging.info("📁 文件检查:")
+    if hasattr(args, 'image') and args.image:
+        for img_path in (args.image if isinstance(args.image, list) else [args.image]):
+            exists = "✅" if Path(img_path).exists() else "❌"
+            logging.info(f"    输入图像: {exists} {img_path}")
+    
+    if hasattr(args, 'input_dir') and args.input_dir:
+        exists = "✅" if Path(args.input_dir).exists() else "❌"
+        logging.info(f"    输入目录: {exists} {args.input_dir}")
+    
+    if hasattr(args, 'config') and args.config:
+        exists = "✅" if Path(args.config).exists() else "❌"
+        logging.info(f"    配置文件: {exists} {args.config}")
+    
+    # 检查模型文件
+    model_file = f"models/sam_{args.model}_*.pth"
+    model_exists = len(list(Path("models").glob(f"sam_{args.model}_*.pth"))) > 0 if Path("models").exists() else False
+    status = "✅" if model_exists else "❌"
+    logging.info(f"    SAM模型: {status} {model_file}")
+    
+    logging.info("=" * 80)
+
+def save_command_to_history(args, output_dir):
+    """将命令行参数保存到历史文件"""
+    try:
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        # 创建命令历史记录
+        history_file = output_path / "command_history.json"
+        
+        command_record = {
+            "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+            "original_command": ' '.join(sys.argv),
+            "parsed_args": vars(args),
+            "working_directory": os.getcwd(),
+            "python_version": sys.version,
+        }
+        
+        # 如果历史文件存在，追加；否则创建新文件
+        if history_file.exists():
+            try:
+                with open(history_file, 'r', encoding='utf-8') as f:
+                    history = json.load(f)
+                if not isinstance(history, list):
+                    history = [history]  # 兼容旧格式
+            except:
+                history = []
+        else:
+            history = []
+        
+        history.append(command_record)
+        
+        # 保存历史记录（最多保留最近50条）
+        with open(history_file, 'w', encoding='utf-8') as f:
+            json.dump(history[-50:], f, indent=2, ensure_ascii=False)
+        
+        logging.info(f"📝 命令记录已保存到: {history_file}")
+        
+    except Exception as e:
+        logging.warning(f"保存命令历史失败: {e}")
+
 
 
 def main():
@@ -213,7 +314,12 @@ def main():
 
         # 设置日志
         setup_logging(args.verbose)
-
+        # 🔥 新增：记录命令行信息
+        log_command_line_info(args)
+        
+        # 🔥 新增：保存命令到历史文件
+        if hasattr(args, 'output'):
+            save_command_to_history(args, args.output)
         # 显示启动信息
         print_startup_banner()
 

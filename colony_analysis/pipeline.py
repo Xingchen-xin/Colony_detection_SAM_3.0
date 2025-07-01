@@ -6,6 +6,8 @@ import logging
 import os
 import time
 from pathlib import Path
+import sys
+
 from typing import Dict, List, Tuple, Optional
 import json
 from tifffile import imread
@@ -223,190 +225,208 @@ class AnalysisPipeline:
         unet_path = self.cfg.get('unet_model_path', "models/unet_fallback.pth")
         self.seg_unet = UnetSegmenter(model_path=unet_path, device=self.args.device) """
     def _correct_plate_perspective(self, img_rgb):
+        # Skip perspective correction since the image is not a chessboard
+        return img_rgb
+    def _self_calibrate_grid(self, centroids, rows: int, cols: int):
         """
-        Use chessboard corner detection to attempt perspective correction
-        and align the 96-well plate.
-        """
-        gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
-        # internal corner grid size: 11x7 for a 12x8 well plate
-        ret, corners = cv2.findChessboardCorners(gray, (11, 7), None)
-        if ret:
-            logging.info("检测到棋盘角点，进行透视校正")
-            pts = corners.reshape(-1, 2)
-            sums = pts.sum(axis=1)
-            diffs = np.diff(pts, axis=1).ravel()
-            tl = pts[np.argmin(sums)]
-            br = pts[np.argmax(sums)]
-            tr = pts[np.argmin(diffs)]
-            bl = pts[np.argmax(diffs)]
-            width = int(np.hypot(tr[0] - tl[0], tr[1] - tl[1]))
-            height = int(np.hypot(bl[0] - tl[0], bl[1] - tl[1]))
-            src = np.array([tl, tr, br, bl], dtype="float32")
-            dst = np.array([[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]], dtype="float32")
-            M = cv2.getPerspectiveTransform(src, dst)
-            warped = cv2.warpPerspective(img_rgb, M, (width, height))
-            return warped
-        else:
-            logging.debug("透视校正：未检测到棋盘角点，保留原图")
-            return img_rgb
-    def _self_calibrate_grid(self, centroids: list[tuple], rows: int, cols: int):
-        """
-        Infer a 12x8 well-plate grid by clustering colony centroids into rows and columns.
-        centroids: list of (x, y) tuples.
+        基于菌落质心推断96孔板网格布局
+        centroids: list of (y, x) tuples (注意：使用(y,x)顺序)
         """
         import numpy as np
         import cv2
 
+        if not centroids:
+            logging.warning("没有质心数据，无法自校准网格")
+            return False
+
         pts = np.array(centroids, dtype=np.float32)
-        if len(pts) < rows + cols:
-            logging.warning("质心数量不足，无法可靠自校准网格，使用静态网格")
-            return
+        if len(pts) < max(rows, cols):  # 至少需要一行或一列的数据
+            logging.warning(f"质心数量({len(pts)})不足，无法可靠自校准网格，使用静态网格")
+            return False
 
-        # Cluster y-coordinates into row centers
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1.0)
-        _, labels_y, centers_y = cv2.kmeans(
-            pts[:, 1].reshape(-1, 1),
-            rows,
-            None,
-            criteria,
-            10,
-            cv2.KMEANS_RANDOM_CENTERS
-        )
-        row_centers = sorted(centers_y.ravel())
+        try:
+            # K-means聚类参数
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1.0)
+            
+            # 对Y坐标(行)进行聚类
+            _, labels_y, centers_y = cv2.kmeans(
+                pts[:, 0].reshape(-1, 1),  # 使用Y坐标(第0列)
+                rows,
+                None,
+                criteria,
+                10,
+                cv2.KMEANS_RANDOM_CENTERS
+            )
+            row_centers = sorted(centers_y.ravel())
 
-        # Cluster x-coordinates into column centers
-        _, labels_x, centers_x = cv2.kmeans(
-            pts[:, 0].reshape(-1, 1),
-            cols,
-            None,
-            criteria,
-            10,
-            cv2.KMEANS_RANDOM_CENTERS
-        )
-        col_centers = sorted(centers_x.ravel())
+            # 对X坐标(列)进行聚类  
+            _, labels_x, centers_x = cv2.kmeans(
+                pts[:, 1].reshape(-1, 1),  # 使用X坐标(第1列)
+                cols,
+                None,
+                criteria,
+                10,
+                cv2.KMEANS_RANDOM_CENTERS
+            )
+            col_centers = sorted(centers_x.ravel())
 
-        # Estimate radius as a fraction of minimal inter-center distance
-        dy = np.min(np.diff(row_centers)) if rows > 1 else 0
-        dx = np.min(np.diff(col_centers)) if cols > 1 else 0
-        est_r = float(max((dx + dy) / 4, 1.0))
+            # 估算搜索半径
+            dy = np.min(np.diff(row_centers)) if len(row_centers) > 1 else 100
+            dx = np.min(np.diff(col_centers)) if len(col_centers) > 1 else 100
+            est_r = float(max((dx + dy) / 4, 30.0))  # 最小半径30像素
 
-        # Build plate_grid mapping in dictionary format
-        plate_grid = {}
-        cell_h = np.min(np.diff(row_centers)) if rows > 1 else dy
-        cell_w = np.min(np.diff(col_centers)) if cols > 1 else dx
-        for i, y in enumerate(row_centers):
-            for j, x in enumerate(col_centers):
-                well_id = f"{chr(65 + i)}{j+1}"
-                plate_grid[well_id] = {
-                    "center": (float(y), float(x)),
-                    "search_radius": est_r,
-                    "row": i,
-                    "col": j,
-                    "expected_bbox": (
-                        int(y - cell_h / 2),
-                        int(x - cell_w / 2),
-                        int(y + cell_h / 2),
-                        int(x + cell_w / 2),
-                    ),
-                }
+            # 构建网格字典
+            plate_grid = {}
+            cell_h = dy
+            cell_w = dx
+            
+            for i, y in enumerate(row_centers):
+                for j, x in enumerate(col_centers):
+                    well_id = f"{chr(65 + i)}{j+1}"
+                    plate_grid[well_id] = {
+                        "center": (float(y), float(x)),  # (y, x)顺序
+                        "search_radius": est_r,
+                        "row": i,
+                        "col": j,
+                        "expected_bbox": (
+                            int(y - cell_h / 2),
+                            int(x - cell_w / 2),
+                            int(y + cell_h / 2),
+                            int(x + cell_w / 2),
+                        ),
+                    }
 
-        self.config.plate_grid = plate_grid
+            self.config.plate_grid = plate_grid
+            logging.info(f"自校准网格完成: {len(row_centers)}行 x {len(col_centers)}列, 搜索半径={est_r:.1f}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"网格自校准失败: {e}")
+            return False
+
     def run(self):
-        """运行完整的分析流程"""
+        """运行完整的分析流程 - 修正版本"""
         self.start_time = time.time()
         try:
             # 1. 初始化组件
             self._initialize_components()
-            # 加载条件化配置（medium/orientation）
-            sample_path = self.args.image if self.args.image else self.args.input_dir
-            cond_cfg = self.cfg_loader.load_for_image(str(sample_path))
-            # —— 应用培养基特定参数覆盖 —— 
-            # —— 应用条件化配置 —— 
-            det_conf = getattr(self.config, "detection", None)
-            if det_conf and "detection" in cond_cfg:
-                for k, v in cond_cfg["detection"].items():
-                    if hasattr(det_conf, k):
-                        setattr(det_conf, k, v)
-            if "sam" in cond_cfg:
-                for k, v in cond_cfg["sam"].items():
-                    if hasattr(self.seg_sam.mask_generator, k):
-                        setattr(self.seg_sam.mask_generator, k, v)
-            logging.info(f"Loaded condition config: {cond_cfg}")
+            
+            # 2. 加载条件化配置（如果配置加载器存在）
+            if self.cfg_loader:
+                sample_path = self.args.image if hasattr(self.args, 'image') and self.args.image else getattr(self.args, 'input_dir', '')
+                try:
+                    cond_cfg = self.cfg_loader.load_for_image(str(sample_path))
+                    
+                    # 应用条件化配置到检测配置
+                    det_conf = getattr(self.config, "detection", None)
+                    if det_conf and "detection" in cond_cfg:
+                        for k, v in cond_cfg["detection"].items():
+                            if hasattr(det_conf, k):
+                                setattr(det_conf, k, v)
+                                
+                    # 应用SAM配置
+                    if "sam" in cond_cfg and hasattr(self.sam_model, 'mask_generator'):
+                        for k, v in cond_cfg["sam"].items():
+                            if hasattr(self.sam_model.mask_generator, k):
+                                setattr(self.sam_model.mask_generator, k, v)
+                                
+                    logging.info(f"已加载条件配置: {cond_cfg}")
+                except Exception as e:
+                    logging.warning(f"加载条件配置失败: {e}")
 
-            # 2. 加载和验证图像
+            # 3. 加载和验证图像
             img_rgb = self._load_and_validate_image()
-            # —— 全局透视校正，以对齐 96 孔板 —— 
+            
+            # 4. 透视校正（现在跳过）
             img_rgb = self._correct_plate_perspective(img_rgb)
-            # 安全获取孔板行列数
+            
+            # 5. 获取孔板参数
             rows = getattr(self.args, "rows", None) or self.config.output.rows
             cols = getattr(self.args, "cols", None) or self.config.output.cols
-            # —— 动态自校准 96孔网格（基于初次自动检测的质心分布） —— 
-            if getattr(self.args, "force_96plate_detection", False):
-                # 初次自动检测获取质心
-                if self.use_cp_sam_masks and self.cp_sam_masks_dir:
-                    auto_cols = self._load_precomputed_colonies(img_rgb, image_path)
-                else:
-                    auto_cols = self.detector.detect(img_rgb, mode="auto")
-                centroids = [c.get("centroid") for c in auto_cols if c.get("centroid") is not None]
-                if centroids:
-                    self._self_calibrate_grid(centroids, rows, cols)
-                    logging.info("动态网格设置完成")
-            else:
-                if not hasattr(self.config, "plate_grid"):
+            
+            # 6. 网格设置策略
+            grid_calibrated = False
+            
+            # 如果启用了动态网格校准，先进行一次自动检测获取质心
+            if getattr(self.args, "force_96plate_detection", False) or self.args.mode == "hybrid":
+                logging.info("开始动态网格校准...")
+                
+                # 执行初步检测获取质心
+                try:
+                    if self.use_cp_sam_masks and self.cp_sam_masks_dir:
+                        auto_cols = self._load_precomputed_colonies(img_rgb, self.args.image)
+                    else:
+                        auto_cols = self.detector.detect(img_rgb, mode="auto")
+                    
+                    centroids = [c.get("centroid") for c in auto_cols if c.get("centroid") is not None]
+                    
+                    if centroids and len(centroids) >= 20:  # 需要足够的质心数据
+                        grid_calibrated = self._self_calibrate_grid(centroids, rows, cols)
+                        if grid_calibrated:
+                            logging.info("动态网格校准成功")
+                        else:
+                            logging.warning("动态网格校准失败，使用静态网格")
+                    else:
+                        logging.warning(f"质心数量不足({len(centroids)})，使用静态网格")
+                        
+                except Exception as e:
+                    logging.error(f"动态网格校准出错: {e}")
+            
+            # 如果动态校准失败，使用静态网格
+            if not grid_calibrated:
+                if not hasattr(self.config, "plate_grid") or not self.config.plate_grid:
                     self.config.plate_grid = self.detector._create_plate_grid(
                         img_rgb.shape[:2], rows, cols
                     )
                     logging.info(f"使用静态网格：{rows} 行 × {cols} 列")
 
-
-            # 3. 执行检测
+            # 7. 执行最终检测
             if getattr(self.args, "force_96plate_detection", False):
-                # 强制96孔板检测模式
                 colonies = self._force_96plate_detection(img_rgb)
             else:
                 colonies = self._detect_colonies(img_rgb)
 
-            # —— 如果是 hybrid 模式，检测器内部已经将每个 colony 对应到 well_position，
-            #    此处额外汇总哪些孔位漏检 ——
-            if self.args.mode == "hybrid":
-                plate_wells = set(self.config.plate_grid.keys())
-                detected_wells = {
-                    c["well_position"]
-                    for c in colonies
-                    if c.get("well_position", "").upper() in plate_wells
-                }
-                missing = plate_wells - detected_wells
-                if missing:
-                    logging.debug(f"以下孔位未检测到任何菌落：{sorted(missing)}")
-
-            # 4. 如果未检测到菌落且开启调试，则保存原始 SAM 掩码用于排查
-            if not colonies and self.args.debug:
-                self.detector.save_raw_debug(img_rgb)
-                return {
-                    "total_colonies": 0,
-                    "elapsed_time": time.time() - self.start_time,
-                    "output_dir": self.args.output,
-                    "mode": self.args.mode,
-                    "model": self.args.model,
-                    "advanced": self.args.advanced,
-                }
-            # 4. 如果没有检测到菌落，记录调试信息
+            # 8. 检查检测结果
             if not colonies:
                 logging.warning("未检测到任何菌落")
                 if self.args.debug:
                     self._save_debug_info(img_rgb)
                 return self._generate_empty_summary()
-            # 5.1 可视化检测结果
-            masks = [colony["mask"] for colony in colonies]
-            Visualizer.overlay_masks(
-                img_rgb,
-                masks,
-                self.result_manager.directories["visualizations"]
-            )
-            # 6. 执行分析
+
+            # 9. 统计孔位信息（对于hybrid模式）
+            if self.args.mode == "hybrid" and hasattr(self.config, 'plate_grid'):
+                plate_wells = set(self.config.plate_grid.keys())
+                detected_wells = {
+                    c["well_position"]
+                    for c in colonies
+                    if c.get("well_position", "") and not c["well_position"].startswith("unmapped")
+                }
+                mapped_count = len(detected_wells)
+                unmapped_count = len([c for c in colonies if c.get("well_position", "").startswith("unmapped")])
+                
+                logging.info(f"检测结果统计:")
+                logging.info(f"  - 成功映射到孔位: {mapped_count} 个菌落")
+                logging.info(f"  - 未映射的菌落: {unmapped_count} 个")
+                logging.info(f"  - 空孔位: {len(plate_wells) - mapped_count} 个")
+
+            # 10. 可视化检测结果
+            try:
+                from .utils.visualization import Visualizer
+                masks = [colony.get("mask") for colony in colonies if colony.get("mask") is not None]
+                if masks:
+                    Visualizer.overlay_masks(
+                        img_rgb,
+                        masks,
+                        self.result_manager.directories["visualizations"],
+                        colonies
+                    )
+            except Exception as e:
+                logging.warning(f"生成可视化失败: {e}")
+
+            # 11. 执行分析
             analyzed_colonies = self._analyze_colonies(colonies)
             
-            # 7. 离群值检测
+            # 12. 离群值检测（如果启用）
             if getattr(self.args, "outlier_detection", False):
                 try:
                     import pandas as pd
@@ -415,19 +435,19 @@ class AnalysisPipeline:
                     metric = getattr(self.args, "outlier_metric", "area")
                     threshold = getattr(self.args, "outlier_threshold", 3.0)
                     df_out = detect_outliers(df, metric=metric, threshold=threshold)
-                    # 更新 analyzed_colonies
                     analyzed_colonies = df_out.to_dict(orient="records")
+                    logging.info("离群值检测完成")
                 except Exception as e:
                     logging.error(f"离群值检测失败: {e}")
 
-            # 8. 保存结果
+            # 13. 保存结果
             self._save_results(analyzed_colonies, img_rgb)
 
-            # 9. 返回结果摘要并记录日志
+            # 14. 生成摘要
             summary = self._generate_summary(analyzed_colonies)
             logging.info(
-                f"分析完成: {summary['total_colonies']} 个菌落,"
-                f" 耗时 {summary['elapsed_time']:.2f}s"
+                f"分析完成: {summary['total_colonies']} 个菌落, "
+                f"耗时 {summary['elapsed_time']:.2f}s"
             )
             return summary
 
@@ -435,11 +455,10 @@ class AnalysisPipeline:
             logging.error(f"分析管道执行失败: {e}")
             import traceback
             logging.debug(traceback.format_exc())
-
-            # 返回错误摘要
+            
             return {
                 "total_colonies": 0,
-                "elapsed_time": time.time() - self.start_time,
+                "elapsed_time": time.time() - self.start_time if self.start_time else 0,
                 "output_dir": self.args.output,
                 "error": str(e),
                 "status": "failed"
