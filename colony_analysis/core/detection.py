@@ -127,7 +127,7 @@ class ColonyDetector:
         if detection_mode == "grid":
             colonies = self._detect_grid_mode(processed_img)
         elif detection_mode == "auto":
-            colonies = self._detect_auto_mode(processed_img)
+            colonies = self._detect_auto_mode_refined(processed_img)
         elif detection_mode == "hybrid":
             colonies = self._detect_hybrid_mode(processed_img)
         else:
@@ -280,7 +280,7 @@ class ColonyDetector:
         logging.info(f"网格模式检测到 {len(grid_colonies)} 个菌落")
 
         # Step 2: auto模式检测，并只填充那些还没被网格占据的孔位
-        auto_colonies = self._detect_auto_mode(img)
+        auto_colonies = self._detect_auto_mode_refined(img)
         logging.info(f"Auto模式检测到 {len(auto_colonies)} 个菌落")
 
         for colony in auto_colonies:
@@ -421,7 +421,7 @@ class ColonyDetector:
 
     # Hybrid detection methods
     def _detect_auto_mode_refined(self, img: np.ndarray) -> List[Dict]:
-        """改进的auto检测：专门针对孔板优化"""
+        """改进的auto检测：专门针对孔板优化 + 颜色引导"""
         logging.info("使用孔板优化的auto检测...")
 
         # 计算合理的面积范围（基于孔板尺寸）
@@ -450,6 +450,36 @@ class ColonyDetector:
             )
             logging.info(f"SAM返回 {len(masks)} 个候选掩码")
 
+            # 🔥 在这里调用颜色引导检测
+            if len(masks) < 90:  # 如果检测结果较少
+                logging.info(f"检测结果较少({len(masks)}个)，启用颜色引导检测")
+                
+                # 保存颜色检测前的图像用于对比
+                if self.debug:
+                    debug_dir = self.result_manager.directories.get("debug", "debug")
+                    cv2.imwrite(
+                        os.path.join(debug_dir, "before_color_guidance.jpg"),
+                        cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                    )
+                
+                color_guided_masks, color_guided_scores = self._color_guided_detection(img)
+                
+                # 去重：避免与已有掩码重复
+                for new_mask, new_score in zip(color_guided_masks, color_guided_scores):
+                    is_duplicate = False
+                    for existing_mask in masks:
+                        overlap = self._calculate_mask_overlap(new_mask, existing_mask)
+                        if overlap > 0.5:  # 50%以上重叠认为是重复
+                            is_duplicate = True
+                            break
+                    
+                    if not is_duplicate:
+                        masks.append(new_mask)
+                        scores.append(new_score)
+                
+                logging.info(f"颜色引导补充了 {len(color_guided_masks)} 个掩码（去重后）")
+
+
             colonies = []
             stats = {"valid": 0, "too_small": 0, "too_large": 0, "low_score": 0}
 
@@ -459,83 +489,44 @@ class ColonyDetector:
                 )
             ):
                 enhanced_mask = self._enhance_colony_mask(mask, img)
-                # —— 在这里插入可视化调试代码 ——
-                if self.debug:
-                    # 先把 mask 区域用绿色叠加到 img 上
-                    vis = img.copy()
-                    vis[enhanced_mask > 0] = [0, 255, 0]  # 绿色标记
-                    # 构造文件名
-                    filename = f"debug_colony_unmapped_{i}.png"
-                    # 获取 ResultManager 的 debug 目录
-                    debug_dir = self.result_manager.directories["debug"]
-                    # 最终完整路径
-                    save_path = debug_dir / filename
-                    # 使用 cv2.imwrite 保存（记得转换回 BGR）
-                    cv2.imwrite(str(save_path), cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
+                
+                # 调试可视化
+                if self.debug and i < 50:  # 只保存前50个
+                    self._save_debug_mask(enhanced_mask, img, i)
+                
                 area = np.sum(enhanced_mask)
-
-                # 新增：边缘伪影检测（由配置决定是否启用）
-                if self.config.enable_edge_artifact_filter and self._is_edge_artifact(
-                    enhanced_mask, img.shape[:2], self.config.edge_margin_pixels
-                ):
-                    # 进一步检查，如果掩码中检测到蓝/红色素，就恢复保留，否则跳过
-                    hsv_local = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
-                    h_loc, s_loc, _ = cv2.split(hsv_local)
-                    ys_e, xs_e = np.where(enhanced_mask > 0)
-                    if len(ys_e) > 0:
-                        mean_h = float(np.mean(h_loc[ys_e, xs_e]))
-                        mean_s = float(np.mean(s_loc[ys_e, xs_e]))
-                    else:
-                        mean_h, mean_s = 0.0, 0.0
-                    # “蓝色”判定
-                    is_blue = 90 <= mean_h <= 140 and mean_s > 40
-                    # “红色”判定
-                    is_red = (mean_h <= 10 or mean_h >= 170) and mean_s > 40
-                    if is_blue or is_red:
-                        logging.debug(f"掩码 {i} 被标记为伪影但含色素，恢复保留")
-                        # 不跳过，继续后续过滤与提取
-                    else:
-                        logging.debug(f"掩码 {i} 被识别为纯伪影，跳过")
-                        continue
 
                 # 严格的面积过滤
                 if area < min_colony_area // 3:
-                    logging.debug(
-                        f"[Mask {i}] 面积({area}) < 最小要求({min_colony_area//2}) => too_small"
-                    )
                     stats["too_small"] += 1
                     continue
                 if area > max_colony_area:
-                    logging.debug(
-                        f"[Mask {i}] 面积({area}) > 最大允许({max_colony_area}) => too_large"
-                    )
                     stats["too_large"] += 1
                     continue
 
                 # 质量分数过滤
                 if score < 0.45:
-                    logging.debug(
-                        f"[Mask {i}] SAM 分数({score:.2f}) < 0.45 => low_score"
-                    )
                     stats["low_score"] += 1
                     continue
 
-                # 形状合理性检查
-                # if not self._is_reasonable_colony_shape(enhanced_mask):
-                #    logging.debug(f"[Mask {i}] 形状不合理 => filtered by _is_reasonable_colony_shape")
-                #    continue
+                # 边缘伪影检测
+                if self.config.enable_edge_artifact_filter and self._is_edge_artifact(
+                    enhanced_mask, img.shape[:2], self.config.edge_margin_pixels
+                ):
+                    # 检查是否含有色素，如果有则保留
+                    if not self._contains_pigment(enhanced_mask, img):
+                        logging.debug(f"掩码 {i} 被识别为纯伪影，跳过")
+                        continue
 
+                # 形状检查
                 if not self._filter_by_shape(enhanced_mask):
-                    logging.debug(
-                        f"[Mask {i}] 圆度 < 0.6 => filtered by _filter_by_shape"
-                    )
-                    continue  # 跳过形状不符的
+                    logging.debug(f"掩码 {i} 形状不符合要求")
+                    continue
 
                 # 背景检测
                 if self.config.background_filter and self._is_background_region(
                     enhanced_mask, img
                 ):
-                    logging.debug(f"[Mask {i}] 被识别为背景区域 => background")
                     stats["background"] = stats.get("background", 0) + 1
                     continue
 
@@ -554,6 +545,222 @@ class ColonyDetector:
         finally:
             # 恢复原始SAM参数
             self.sam_model.params = original_params
+    def _calculate_mask_overlap(self, mask1: np.ndarray, mask2: np.ndarray) -> float:
+        """计算两个掩码的重叠度（IoU）"""
+        intersection = np.logical_and(mask1, mask2)
+        union = np.logical_or(mask1, mask2)
+        
+        union_area = np.sum(union)
+        if union_area == 0:
+            return 0.0
+        
+        return np.sum(intersection) / union_area
+
+    def _color_guided_detection(self, img: np.ndarray) -> Tuple[List[np.ndarray], List[float]]:
+        """基于颜色的引导检测 - 改进版"""
+        masks = []
+        scores = []
+        
+        hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+        
+        # 配置不同颜色的检测参数
+        color_configs = {
+            'red': {
+                'ranges': [
+                    ([0, 40, 40], [15, 255, 255]),
+                    ([165, 40, 40], [180, 255, 255])
+                ],
+                'min_area': 300,
+                'debug_color': (0, 0, 255)
+            },
+            'blue': {
+                'ranges': [
+                    ([90, 50, 50], [130, 255, 255])
+                ],
+                'min_area': 300,
+                'debug_color': (255, 0, 0)
+            },
+            'dark': {
+                'ranges': [
+                    ([0, 0, 0], [180, 255, 80])  # 低亮度
+                ],
+                'min_area': 500,
+                'debug_color': (128, 128, 128)
+            }
+        }
+        
+        for color_name, config in color_configs.items():
+            # 创建颜色掩码
+            color_mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+            for lower, upper in config['ranges']:
+                mask = cv2.inRange(hsv, np.array(lower), np.array(upper))
+                color_mask = cv2.bitwise_or(color_mask, mask)
+            
+            # 形态学清理
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, kernel)
+            color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel)
+            
+            # 找轮廓并检测
+            contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            for i, contour in enumerate(contours):
+                area = cv2.contourArea(contour)
+                if area < config['min_area']:
+                    continue
+                
+                # 尝试多种提示方式
+                success = False
+                
+                # 1. 中心点提示
+                M = cv2.moments(contour)
+                if M["m00"] != 0:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                    
+                    try:
+                        mask, score = self.sam_model.segment_with_prompts(
+                            img, points=[[cx, cy]], point_labels=[1]
+                        )
+                        if score > 0.6 and self._validate_detection(mask, contour):
+                            masks.append(mask)
+                            scores.append(score)
+                            success = True
+                            
+                            # 保存调试图像
+                            if self.debug:
+                                self._save_debug_visualization(
+                                    mask, img, f"{color_name}_point_{i}", 
+                                    config['debug_color']
+                                )
+                    except:
+                        pass
+                
+                # 2. 如果点提示失败，尝试框提示
+                if not success:
+                    x, y, w, h = cv2.boundingRect(contour)
+                    padding = max(10, int(min(w, h) * 0.1))
+                    x1 = max(0, x - padding)
+                    y1 = max(0, y - padding)
+                    x2 = min(img.shape[1], x + w + padding)
+                    y2 = min(img.shape[0], y + h + padding)
+                    
+                    try:
+                        box = np.array([x1, y1, x2, y2])
+                        mask, score = self.sam_model.segment_with_prompts(img, boxes=box)
+                        
+                        if score > 0.5 and self._validate_detection(mask, contour):
+                            masks.append(mask)
+                            scores.append(score)
+                            
+                            if self.debug:
+                                self._save_debug_visualization(
+                                    mask, img, f"{color_name}_box_{i}", 
+                                    config['debug_color']
+                                )
+                    except:
+                        pass
+        
+        logging.info(f"颜色引导检测完成: 红={len([m for m,s in zip(masks,scores) if 'red' in str(m)])}个")
+        return masks, scores
+
+    def _validate_detection(self, mask: np.ndarray, original_contour) -> bool:
+        """验证检测结果是否合理"""
+        # 检查掩码面积
+        mask_area = np.sum(mask)
+        contour_area = cv2.contourArea(original_contour)
+        
+        # 面积不应相差太大
+        if mask_area < contour_area * 0.5 or mask_area > contour_area * 3:
+            return False
+        
+        # 使用现有的形状检查
+        return self._is_reasonable_colony_shape(mask)
+
+    def _contains_pigment(self, mask: np.ndarray, img: np.ndarray, 
+                        check_channels: bool = False) -> bool:
+        """统一的色素检测方法"""
+        ys, xs = np.where(mask > 0)
+        if len(ys) == 0:
+            return False
+        
+        hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+        h, s, v = cv2.split(hsv)
+        
+        mean_h = float(np.mean(h[ys, xs]))
+        mean_s = float(np.mean(s[ys, xs]))
+        
+        # 基本HSV判断
+        is_blue = 90 <= mean_h <= 140 and mean_s > 30
+        is_red = (mean_h <= 15 or mean_h >= 165) and mean_s > 30
+        
+        # 如果需要更严格的通道检查
+        if check_channels and (is_blue or is_red):
+            r, g, b = cv2.split(img)
+            mean_r = float(np.mean(r[ys, xs]))
+            mean_g = float(np.mean(g[ys, xs]))
+            mean_b = float(np.mean(b[ys, xs]))
+            
+            if is_blue:
+                # 验证蓝色：B通道应该最高
+                is_blue = mean_b > mean_r + 10 and mean_b > mean_g + 10
+            if is_red:
+                # 验证红色：R通道应该最高
+                is_red = mean_r > mean_b + 10 and mean_r > mean_g + 10
+        
+        return is_blue or is_red
+
+    def _save_debug_mask(self, mask: np.ndarray, identifier, img_array: Optional[np.ndarray] = None) -> None:
+        """保存调试掩码"""
+        if not self.debug or not hasattr(self, 'result_manager'):
+            return
+        # 使用显式传入的图像，否则回退到 _last_img
+        if img_array is not None and isinstance(img_array, np.ndarray):
+            image_to_save = img_array
+        else:
+            image_to_save = getattr(self, '_last_img', None)
+        if image_to_save is None or not isinstance(image_to_save, np.ndarray):
+            return
+        # 创建可视化叠加
+        vis = image_to_save.copy()
+        vis[mask > 0] = [0, 255, 0]
+        # 构造并保存文件
+        filename = f"debug_mask_{identifier}.png"
+        debug_dir = self.result_manager.directories['debug']
+        save_path = debug_dir / filename
+        cv2.imwrite(str(save_path), cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
+
+    def _save_debug_visualization(self, mask: np.ndarray, img: np.ndarray, 
+                                colony_id: str, overlay_color=(0, 255, 0)):
+        """统一的调试可视化保存"""
+        if not self.debug or not hasattr(self, 'result_manager'):
+            return
+        
+        vis = img.copy()
+        # 支持不同颜色的叠加
+        overlay = np.zeros_like(vis)
+        overlay[mask > 0] = overlay_color
+        vis = cv2.addWeighted(vis, 0.7, overlay, 0.3, 0)
+        
+        # 添加轮廓
+        contours, _ = cv2.findContours(
+            mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        cv2.drawContours(vis, contours, -1, overlay_color, 2)
+        
+        # 添加标签
+        if contours:
+            M = cv2.moments(contours[0])
+            if M["m00"] != 0:
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+                cv2.putText(vis, colony_id, (cx-20, cy-20), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+        
+        filename = f"debug_{colony_id}.png"
+        debug_dir = self.result_manager.directories["debug"]
+        save_path = debug_dir / filename
+        cv2.imwrite(str(save_path), cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
 
     def _create_plate_grid(
         self, img_shape: Tuple[int, int], rows: int = 8, cols: int = 12
@@ -595,8 +802,8 @@ class ColonyDetector:
         height, width = img_shape
         
         # **修复1：使用更合适的边距**
-        margin_y = height * 0.05  # 5%边距，之前是3%
-        margin_x = width * 0.05
+        margin_y = height * 0.06  # 5%边距，之前是3%
+        margin_x = width * 0.06
         
         usable_height = height - 2 * margin_y
         usable_width = width - 2 * margin_x
@@ -609,7 +816,7 @@ class ColonyDetector:
         # 当行列数较多或图像尺寸较大时可能导致半径过小。
         # 这里直接取单元格尺寸的一半作为搜索半径，
         # 可确保在其所属格子范围内都能成功匹配。
-        search_radius = max(cell_height, cell_width) / 2
+        search_radius = max(cell_height, cell_width) * 0.4
         
         plate_grid = {}
         row_labels = [chr(65 + i) for i in range(rows)]  # A-H
@@ -627,10 +834,10 @@ class ColonyDetector:
                 center_x = margin_x + (c + 0.5) * cell_width
                 
                 # **修复4：边界框计算**
-                bbox_y1 = int(center_y - cell_height / 2)
-                bbox_x1 = int(center_x - cell_width / 2)
-                bbox_y2 = int(center_y + cell_height / 2)
-                bbox_x2 = int(center_x + cell_width / 2)
+                bbox_y1 = int(center_y - cell_height * 0.45)
+                bbox_x1 = int(center_x - cell_width * 0.45)
+                bbox_y2 = int(center_y + cell_height * 0.45)
+                bbox_x2 = int(center_x + cell_width * 0.45)
                 
                 plate_grid[well_id] = {
                     "center": (float(center_y), float(center_x)),  # 注意：(y, x)顺序
@@ -1234,11 +1441,11 @@ class ColonyDetector:
                 )
                 # 收紧红色阈值：R 对比度 > b+15, g+15，饱和度/亮度 > 60
                 cond_red = (
-                    (h_full[y, x] <= 10 or h_full[y, x] >= 170)
-                    and r_channel[y, x] > b_channel[y, x] + 15
-                    and r_channel[y, x] > g_channel[y, x] + 15
-                    and s_full[y, x] > 60
-                    and v_full[y, x] > 60
+                    (h_full[y, x] <= 15 or h_full[y, x] >= 165)
+                    and r_channel[y, x] > b_channel[y, x] + 5
+                    and r_channel[y, x] > g_channel[y, x] + 5
+                    and s_full[y, x] > 20
+                    and v_full[y, x] > 20
                 )
                 if cond_gray or cond_blue or cond_red:
                     enhanced[y, x] = 1
@@ -1967,3 +2174,4 @@ class ColonyDetector:
                 return False
 
         return True
+from typing import Optional
