@@ -802,8 +802,8 @@ class ColonyDetector:
         height, width = img_shape
         
         # **修复1：使用更合适的边距**
-        margin_y = height * 0.06  # 5%边距，之前是3%
-        margin_x = width * 0.06
+        margin_y = height * 0.08  # 5%边距，之前是3%
+        margin_x = width * 0.08
         
         usable_height = height - 2 * margin_y
         usable_width = width - 2 * margin_x
@@ -816,7 +816,7 @@ class ColonyDetector:
         # 当行列数较多或图像尺寸较大时可能导致半径过小。
         # 这里直接取单元格尺寸的一半作为搜索半径，
         # 可确保在其所属格子范围内都能成功匹配。
-        search_radius = max(cell_height, cell_width) * 0.4
+        search_radius = max(cell_height, cell_width) * 0.65
         
         plate_grid = {}
         row_labels = [chr(65 + i) for i in range(rows)]  # A-H

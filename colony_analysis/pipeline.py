@@ -237,7 +237,7 @@ class AnalysisPipeline:
             return False
 
         pts = np.array(centroids, dtype=np.float32)
-        if len(pts) < max(rows, cols):
+        if len(pts) < 8:
             logging.warning(f"质心数量({len(pts)})不足，无法可靠自校准网格，使用静态网格")
             return False
 
@@ -272,8 +272,8 @@ class AnalysisPipeline:
             dx = np.mean(np.diff(col_centers)) if len(col_centers) > 1 else 100
             
             # 搜索半径应该是单元格间距的40-50%，确保有足够的覆盖
-            est_r = float(max(dx, dy) * 0.45)  # 使用45%的单元格间距
-            est_r = max(est_r, 50.0)  # 最小半径50像素（原来是30）
+            est_r = float(max(dx, dy) * 0.65)  # 使用45%的单元格间距
+            est_r = max(est_r, 80.0)  # 最小半径50像素（原来是30）
             
             logging.info(f"网格间距: dx={dx:.1f}, dy={dy:.1f}")
             logging.info(f"计算的搜索半径: {est_r:.1f}")
