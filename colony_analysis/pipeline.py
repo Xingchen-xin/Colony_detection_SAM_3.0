@@ -228,10 +228,7 @@ class AnalysisPipeline:
         # Skip perspective correction since the image is not a chessboard
         return img_rgb
     def _self_calibrate_grid(self, centroids, rows: int, cols: int):
-        """
-        基于菌落质心推断96孔板网格布局
-        centroids: list of (y, x) tuples (注意：使用(y,x)顺序)
-        """
+        """基于菌落质心推断96孔板网格布局"""
         import numpy as np
         import cv2
 
@@ -240,7 +237,7 @@ class AnalysisPipeline:
             return False
 
         pts = np.array(centroids, dtype=np.float32)
-        if len(pts) < max(rows, cols):  # 至少需要一行或一列的数据
+        if len(pts) < max(rows, cols):
             logging.warning(f"质心数量({len(pts)})不足，无法可靠自校准网格，使用静态网格")
             return False
 
@@ -250,7 +247,7 @@ class AnalysisPipeline:
             
             # 对Y坐标(行)进行聚类
             _, labels_y, centers_y = cv2.kmeans(
-                pts[:, 0].reshape(-1, 1),  # 使用Y坐标(第0列)
+                pts[:, 0].reshape(-1, 1),
                 rows,
                 None,
                 criteria,
@@ -261,7 +258,7 @@ class AnalysisPipeline:
 
             # 对X坐标(列)进行聚类  
             _, labels_x, centers_x = cv2.kmeans(
-                pts[:, 1].reshape(-1, 1),  # 使用X坐标(第1列)
+                pts[:, 1].reshape(-1, 1),
                 cols,
                 None,
                 criteria,
@@ -270,10 +267,16 @@ class AnalysisPipeline:
             )
             col_centers = sorted(centers_x.ravel())
 
-            # 估算搜索半径
-            dy = np.min(np.diff(row_centers)) if len(row_centers) > 1 else 100
-            dx = np.min(np.diff(col_centers)) if len(col_centers) > 1 else 100
-            est_r = float(max((dx + dy) / 4, 30.0))  # 最小半径30像素
+            # 估算搜索半径 - 修复：使用更合理的计算方式
+            dy = np.mean(np.diff(row_centers)) if len(row_centers) > 1 else 100
+            dx = np.mean(np.diff(col_centers)) if len(col_centers) > 1 else 100
+            
+            # 搜索半径应该是单元格间距的40-50%，确保有足够的覆盖
+            est_r = float(max(dx, dy) * 0.45)  # 使用45%的单元格间距
+            est_r = max(est_r, 50.0)  # 最小半径50像素（原来是30）
+            
+            logging.info(f"网格间距: dx={dx:.1f}, dy={dy:.1f}")
+            logging.info(f"计算的搜索半径: {est_r:.1f}")
 
             # 构建网格字典
             plate_grid = {}
@@ -284,7 +287,7 @@ class AnalysisPipeline:
                 for j, x in enumerate(col_centers):
                     well_id = f"{chr(65 + i)}{j+1}"
                     plate_grid[well_id] = {
-                        "center": (float(y), float(x)),  # (y, x)顺序
+                        "center": (float(y), float(x)),
                         "search_radius": est_r,
                         "row": i,
                         "col": j,
@@ -501,9 +504,31 @@ class AnalysisPipeline:
             hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV)
             red_mask = (
                 ((hsv[:,:,0] < 10) | (hsv[:,:,0] > 170))
-                & (hsv[:,:,1] > 80)
-                & (hsv[:,:,2] > 80)
-            )
+                & (hsv[:,:,1] > 100)
+                & (hsv[:,:,2] > 100)
+            ).astype(np.uint8)
+                # 添加形态学操作去除噪声
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel)
+            red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel)
+            
+            # 只在较大的红色区域中心采样
+            contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            pts = []
+            for cnt in contours:
+                area = cv2.contourArea(cnt)
+                if area > 100:  # 只考虑面积大于100的区域
+                    M = cv2.moments(cnt)
+                    if M["m00"] != 0:
+                        cx = int(M["m10"] / M["m00"])
+                        cy = int(M["m01"] / M["m00"])
+                        pts.append([cx, cy])
+            
+            # 限制提示点数量，避免过度检测
+            if len(pts) > 30:
+                # 随机采样30个点
+                import random
+                pts = random.sample(pts, 30)
             ys, xs = np.where(red_mask)
             pts = list(zip(xs.tolist(), ys.tolist()))
             if pts:
@@ -530,24 +555,31 @@ class AnalysisPipeline:
             # 网格检测
             rows = getattr(self.args, "rows", 8)
             cols = getattr(self.args, "cols", 12)
-            masks, labels = self.detector.segment_grid(
-                img_rgb,
-                rows=rows,
-                cols=cols,
-                padding=self.config.detection.edge_margin_ratio
-            )
-            
-            # 处理网格检测结果
-            for mask, lab in zip(masks, labels):
-                if mask is not None and np.sum(mask) > self.config.detection.min_colony_area:
-                    c = self.detector._extract_colony_data(
-                        img_rgb, mask, f"grid_{lab}", "grid"
+            # 使用网格中心点作为提示
+            grid_colonies = []
+            for well_id, info in plate_grid.items():
+                cy, cx = info["center"]
+                try:
+                    # 使用点提示在每个孔位中心检测
+                    mask, score = self.detector.segment_with_prompts(
+                        img_rgb, 
+                        points=[[int(cx), int(cy)]], 
+                        point_labels=[1]
                     )
-                    if c:
-                        c["well_position"] = lab
-                        colonies.append(c)
+                    
+                    if score > 0.7 and np.sum(mask) > self.config.detection.min_colony_area:
+                        colony_data = self.detector._extract_colony_data(
+                            img_rgb, mask, well_id, "grid_prompt"
+                        )
+                        if colony_data:
+                            colony_data["well_position"] = well_id
+                            colony_data["sam_score"] = float(score)
+                            grid_colonies.append(colony_data)
+                except:
+                    continue
             
-            logging.info(f"Grid segmentation added {len(colonies)} colonies")
+            colonies = grid_colonies
+            logging.info(f"Grid-based detection found {len(colonies)} colonies")
             
             # Auto检测补充
             logging.info("Running auto-detect for additional colonies")
@@ -609,7 +641,7 @@ class AnalysisPipeline:
                 
                 # **修复3：使用更宽松的搜索半径**
                 search_radius = info.get("search_radius", 50)
-                max_search_radius = search_radius * 2.0  # 扩大搜索半径
+                max_search_radius = search_radius * 2.5  # 扩大搜索半径
                 
                 if d < min_dist and d < max_search_radius:
                     min_dist = d
@@ -696,7 +728,7 @@ class AnalysisPipeline:
                 wx, wy = int(wx), int(wy)
                 
                 # 提取局部特征
-                est_radius = max(15, min(median_radius, 35))  # 限制半径范围
+                est_radius = max(15, min(median_radius, 50))  # 限制半径范围
                 mask = np.zeros(img_rgb.shape[:2], dtype=np.uint8)
                 cv2.circle(mask, (wx, wy), est_radius, 1, thickness=-1)
                 local_pixels = img_rgb[mask > 0]

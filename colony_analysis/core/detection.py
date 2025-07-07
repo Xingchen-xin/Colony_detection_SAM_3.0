@@ -209,6 +209,7 @@ class ColonyDetector:
             "too_large": 0,
             "background": 0,
             "valid": 0,
+            "invalid_location": 0,
         }
 
         for i, (mask, score) in enumerate(
@@ -243,6 +244,12 @@ class ColonyDetector:
                     img, enhanced_mask, f"colony_{i}", "sam_auto"
                 )
 
+                # 严格验证菌落位置
+                if colony_data is not None:
+                    if not self._validate_colony_location(colony_data, img.shape[:2]):
+                        filtered_counts["invalid_location"] += 1
+                        continue
+
                 if colony_data:
                     colony_data["sam_score"] = float(score)
                     colonies.append(colony_data)
@@ -258,6 +265,7 @@ class ColonyDetector:
             f"过滤统计: 过小={filtered_counts['too_small']}, "
             f"过大={filtered_counts['too_large']}, "
             f"背景={filtered_counts['background']}, "
+            f"无效位置={filtered_counts['invalid_location']}, "
             f"有效={filtered_counts['valid']}"
         )
 
@@ -1937,3 +1945,25 @@ class ColonyDetector:
     # ========================================
     # 确保在 detection.py 文件顶部有这些导入:
     # from typing import Dict, List, Optional, Tuple
+
+    def _validate_colony_location(self, colony: Dict, img_shape: Tuple[int, int]) -> bool:
+        """验证菌落位置是否合理"""
+        centroid = colony.get('centroid', (0, 0))
+        cy, cx = centroid
+        h, w = img_shape
+
+        # 检查是否在图像边缘（可能是真实菌落或伪影）
+        edge_margin = 50
+        if (cy < edge_margin or cy > h - edge_margin or 
+            cx < edge_margin or cx > w - edge_margin):
+            return True  # 边缘保留
+
+        # 中心区域需要更严格的验证
+        center_y, center_x = h // 2, w // 2
+        if abs(cy - center_y) < 100 and abs(cx - center_x) < 200:
+            area = colony.get('area', 0)
+            sam_score = colony.get('sam_score', 0)
+            if area < 3000 or sam_score < 0.85:
+                return False
+
+        return True
