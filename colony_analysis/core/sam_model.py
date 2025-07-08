@@ -95,13 +95,14 @@ class SAMModel:
 
     def _extract_sam_params(self, config) -> dict:
         """从配置中提取SAM参数"""
+        # 关键：修改默认参数
         default_params = {
-            "points_per_side": 64,
-            "pred_iou_thresh": 0.85,
-            "stability_score_thresh": 0.8,
-            "crop_n_layers": 1,
+            "points_per_side": 24,  # 从64改为24
+            "pred_iou_thresh": 0.9,  # 从0.85改为0.9
+            "stability_score_thresh": 0.9,  # 从0.8改为0.9
+            "crop_n_layers": 0,  # 从1改为0
             "crop_n_points_downscale_factor": 1,
-            "min_mask_region_area": 1500,
+            "min_mask_region_area": 2000,  # 从1500改为2000
         }
 
         if config is not None:

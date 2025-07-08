@@ -385,7 +385,7 @@ class AnalysisPipeline:
 
             # 7. 执行最终检测
             if getattr(self.args, "force_96plate_detection", False):
-                colonies = self._force_96plate_detection(img_rgb)
+                colonies = self._force_96plate_detection_simplified(img_rgb)
             else:
                 colonies = self._detect_colonies(img_rgb)
 
@@ -775,6 +775,43 @@ class AnalysisPipeline:
             self._save_96plate_visualization(img_rgb, well_to_colony, plate_grid, empty_wells)
         
         return forced_colonies
+    # 简化 _force_96plate_detection 方法
+    def _force_96plate_detection_simplified(self, img_rgb):
+        """简化的强制96孔板检测"""
+        logging.info("使用简化的强制96孔板检测")
+        
+        # 直接使用网格检测
+        colonies = self._detect_96plate_simple(img_rgb)
+        
+        # 为未检测到菌落的孔位创建占位符
+        detected_wells = {c["well_position"] for c in colonies}
+        all_wells = set()
+        
+        rows, cols = 8, 12
+        row_labels = [chr(65 + i) for i in range(rows)]
+        for r in range(rows):
+            for c in range(cols):
+                all_wells.add(f"{row_labels[r]}{c+1}")
+        
+        empty_wells = all_wells - detected_wells
+        
+        # 根据策略处理空孔位
+        if self.args.fallback_null_policy == "fill":
+            for well_id in empty_wells:
+                # 创建推测的菌落条目
+                inferred_colony = {
+                    "id": f"inferred_{well_id}",
+                    "well_position": well_id,
+                    "area": 0.0,
+                    "colony_status": "empty",
+                    "is_null": True,
+                    "forced_96plate": True,
+                    "sam_score": 0.0,
+                }
+                colonies.append(inferred_colony)
+        
+        logging.info(f"检测到 {len(detected_wells)} 个菌落，{len(empty_wells)} 个空孔位")
+        return colonies
 
     def _save_96plate_visualization(self, img_rgb, well_to_colony, plate_grid, empty_wells):
         """保存96孔板检测可视化"""

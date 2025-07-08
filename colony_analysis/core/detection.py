@@ -420,6 +420,7 @@ class ColonyDetector:
         return colonies
 
     # Hybrid detection methods
+# 1. 修改现有的 _detect_auto_mode_refined 方法
     def _detect_auto_mode_refined(self, img: np.ndarray) -> List[Dict]:
         """改进的auto检测：专门针对孔板优化 + 颜色引导"""
         logging.info("使用孔板优化的auto检测...")
@@ -428,16 +429,19 @@ class ColonyDetector:
         img_area = img.shape[0] * img.shape[1]
         well_area = img_area / (8 * 12)  # 假设96孔板
 
-        # 菌落面积应该在单个孔的7%-120%之间
-        min_colony_area = int(well_area * 0.07)
-        max_colony_area = int(well_area * 1.2)
+        # 关键改动1：调整面积范围
+        min_colony_area = int(well_area * 0.15)  # 菌落占孔位15%-80%
+        max_colony_area = int(well_area * 0.8)
 
         logging.info(f"动态计算面积范围: {min_colony_area} - {max_colony_area}")
 
-        # 使用更密集的采样点检测小菌落
+        # 关键改动2：大幅调整SAM参数以减少过度分割
         sam_params_override = {
-            "points_per_side": 128,  # 增加采样密度
-            "min_mask_region_area": min_colony_area // 4,
+            "points_per_side": 24,  # 大幅减少！原来是128
+            "pred_iou_thresh": 0.9,  # 提高阈值
+            "stability_score_thresh": 0.9,  # 提高阈值
+            "min_mask_region_area": min_colony_area,  # 不要除以4！
+            "crop_n_layers": 0,  # 禁用crop
         }
 
         # 临时更新SAM参数
@@ -446,58 +450,63 @@ class ColonyDetector:
 
         try:
             masks, scores = self.sam_model.segment_everything(
-                img, min_area=max(50, min_colony_area // 4)
+                img, 
+                min_area=min_colony_area,
+                max_area=max_colony_area
             )
-            logging.info(f"SAM返回 {len(masks)} 个候选掩码")
-
-            # 🔥 在这里调用颜色引导检测
-            if len(masks) < 90:  # 如果检测结果较少
-                logging.info(f"检测结果较少({len(masks)}个)，启用颜色引导检测")
-                
-                # 保存颜色检测前的图像用于对比
-                if self.debug:
-                    debug_dir = self.result_manager.directories.get("debug", "debug")
-                    cv2.imwrite(
-                        os.path.join(debug_dir, "before_color_guidance.jpg"),
-                        cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                    )
-                
-                color_guided_masks, color_guided_scores = self._color_guided_detection(img)
-                
-                # 去重：避免与已有掩码重复
-                for new_mask, new_score in zip(color_guided_masks, color_guided_scores):
-                    is_duplicate = False
-                    for existing_mask in masks:
-                        overlap = self._calculate_mask_overlap(new_mask, existing_mask)
-                        if overlap > 0.5:  # 50%以上重叠认为是重复
-                            is_duplicate = True
-                            break
-                    
-                    if not is_duplicate:
-                        masks.append(new_mask)
-                        scores.append(new_score)
-                
-                logging.info(f"颜色引导补充了 {len(color_guided_masks)} 个掩码（去重后）")
+            
+            logging.info(f"SAM原始返回 {len(masks)} 个掩码")
+            
+            # 添加调试信息
+            if len(masks) > 0:
+                areas = [np.sum(m) for m in masks]
+                logging.info(f"掩码面积分布: min={min(areas)}, max={max(areas)}, "
+                            f"mean={np.mean(areas):.0f}, median={np.median(areas):.0f}")
+                small_masks = sum(1 for a in areas if a < min_colony_area/2)
+                if small_masks > 0:
+                    logging.warning(f"发现 {small_masks} 个过小的碎片掩码")
+            
+            # 步骤1：先合并距离很近的掩码（处理过度分割）
+            if len(masks) > 100:  # 阈值可以调整
+                logging.info("执行掩码合并...")
+                original_count = len(masks)
+                masks, scores = self._merge_close_masks(
+                    masks, scores, 
+                    distance_threshold=50.0  # 可以根据实际情况调整
+                )
+                logging.info(f"合并完成: {original_count} -> {len(masks)} 个掩码")
+            
+            # 步骤2：再进行NMS（处理重叠检测）
+            if len(masks) > 120:  # 仍然过多
+                logging.info("执行非极大值抑制...")
+                original_count = len(masks)
+                masks, scores = self._nms_masks(
+                    masks, scores, 
+                    iou_threshold=0.3  # 可以调整，0.3表示30%重叠就认为是重复
+                )
+                logging.info(f"NMS完成: {original_count} -> {len(masks)} 个掩码")
+            
+            # 步骤3：如果还是太多，可以根据分数筛选
+            if len(masks) > 150:
+                logging.warning(f"掩码仍然过多({len(masks)})，按分数筛选前120个")
+                # 按分数排序，只保留前120个
+                sorted_indices = np.argsort(scores)[::-1][:120]
+                masks = [masks[i] for i in sorted_indices]
+                scores = [scores[i] for i in sorted_indices]
 
 
             colonies = []
             stats = {"valid": 0, "too_small": 0, "too_large": 0, "low_score": 0}
 
             for i, (mask, score) in enumerate(
-                tqdm(
-                    zip(masks, scores), total=len(masks), desc="Refined auto detecting"
-                )
+                tqdm(zip(masks, scores), total=len(masks), desc="Refined auto detecting")
             ):
-                enhanced_mask = self._enhance_colony_mask(mask, img)
-                
-                # 调试可视化
-                if self.debug and i < 50:  # 只保存前50个
-                    self._save_debug_mask(enhanced_mask, img, i)
-                
-                area = np.sum(enhanced_mask)
+                # 不要再enhance mask，这可能导致过度扩张
+                # enhanced_mask = self._enhance_colony_mask(mask, img)
+                area = np.sum(mask)
 
                 # 严格的面积过滤
-                if area < min_colony_area // 3:
+                if area < min_colony_area:
                     stats["too_small"] += 1
                     continue
                 if area > max_colony_area:
@@ -505,33 +514,12 @@ class ColonyDetector:
                     continue
 
                 # 质量分数过滤
-                if score < 0.45:
+                if score < 0.7:  # 提高分数阈值
                     stats["low_score"] += 1
                     continue
 
-                # 边缘伪影检测
-                if self.config.enable_edge_artifact_filter and self._is_edge_artifact(
-                    enhanced_mask, img.shape[:2], self.config.edge_margin_pixels
-                ):
-                    # 检查是否含有色素，如果有则保留
-                    if not self._contains_pigment(enhanced_mask, img):
-                        logging.debug(f"掩码 {i} 被识别为纯伪影，跳过")
-                        continue
-
-                # 形状检查
-                if not self._filter_by_shape(enhanced_mask):
-                    logging.debug(f"掩码 {i} 形状不符合要求")
-                    continue
-
-                # 背景检测
-                if self.config.background_filter and self._is_background_region(
-                    enhanced_mask, img
-                ):
-                    stats["background"] = stats.get("background", 0) + 1
-                    continue
-
                 colony_data = self._extract_colony_data(
-                    img, enhanced_mask, f"colony_{i}", "sam_auto_refined"
+                    img, mask, f"colony_{i}", "sam_auto_refined"
                 )
 
                 if colony_data:
@@ -544,6 +532,197 @@ class ColonyDetector:
 
         finally:
             # 恢复原始SAM参数
+            self.sam_model.params = original_params
+    
+    def _merge_close_masks(self, masks: List[np.ndarray], scores: List[float], 
+                        distance_threshold: float = 50.0,
+                        overlap_threshold: float = 0.1) -> Tuple[List[np.ndarray], List[float]]:
+        """改进的合并算法：同时考虑距离和重叠"""
+        if len(masks) <= 1:
+            return masks, scores
+        
+        # 计算所有掩码的质心和边界框
+        mask_info = []
+        for i, mask in enumerate(masks):
+            ys, xs = np.where(mask)
+            if len(ys) > 0:
+                centroid = (np.mean(ys), np.mean(xs))
+                bbox = (np.min(ys), np.min(xs), np.max(ys), np.max(xs))
+                mask_info.append({
+                    'idx': i,
+                    'centroid': centroid,
+                    'bbox': bbox,
+                    'area': len(ys)
+                })
+            else:
+                mask_info.append(None)
+        
+        # 构建合并组
+        merged_groups = []
+        used = set()
+        
+        for i in range(len(masks)):
+            if i in used or mask_info[i] is None:
+                continue
+                
+            group = [i]
+            used.add(i)
+            
+            # 找到所有应该合并的掩码
+            for j in range(i + 1, len(masks)):
+                if j in used or mask_info[j] is None:
+                    continue
+                
+                # 检查是否应该合并
+                should_merge = False
+                
+                # 条件1：质心距离很近
+                dist = np.sqrt(
+                    (mask_info[i]['centroid'][0] - mask_info[j]['centroid'][0])**2 + 
+                    (mask_info[i]['centroid'][1] - mask_info[j]['centroid'][1])**2
+                )
+                if dist < distance_threshold:
+                    should_merge = True
+                
+                # 条件2：边界框重叠
+                if not should_merge:
+                    # 计算边界框IoU
+                    y1_min, x1_min, y1_max, x1_max = mask_info[i]['bbox']
+                    y2_min, x2_min, y2_max, x2_max = mask_info[j]['bbox']
+                    
+                    # 交集
+                    inter_y_min = max(y1_min, y2_min)
+                    inter_x_min = max(x1_min, x2_min)
+                    inter_y_max = min(y1_max, y2_max)
+                    inter_x_max = min(x1_max, x2_max)
+                    
+                    if inter_y_max > inter_y_min and inter_x_max > inter_x_min:
+                        inter_area = (inter_y_max - inter_y_min) * (inter_x_max - inter_x_min)
+                        box1_area = (y1_max - y1_min) * (x1_max - x1_min)
+                        box2_area = (y2_max - y2_min) * (x2_max - x2_min)
+                        iou = inter_area / (box1_area + box2_area - inter_area)
+                        
+                        if iou > overlap_threshold:
+                            should_merge = True
+                
+                if should_merge:
+                    group.append(j)
+                    used.add(j)
+            
+            merged_groups.append(group)
+        
+        # 合并每组掩码
+        new_masks = []
+        new_scores = []
+        
+        for group in merged_groups:
+            if len(group) == 1:
+                new_masks.append(masks[group[0]])
+                new_scores.append(scores[group[0]])
+            else:
+                # 合并多个掩码
+                merged_mask = np.zeros_like(masks[0], dtype=bool)
+                for idx in group:
+                    merged_mask = np.logical_or(merged_mask, masks[idx])
+                
+                new_masks.append(merged_mask.astype(np.uint8))
+                new_scores.append(max([scores[idx] for idx in group]))
+                
+                logging.debug(f"合并了 {len(group)} 个掩码")
+        
+        return new_masks, new_scores
+
+    # 2. 添加非极大值抑制方法
+    def _nms_masks(self, masks: List[np.ndarray], scores: List[float], 
+                iou_threshold: float = 0.5) -> Tuple[List[np.ndarray], List[float]]:
+        """对掩码进行非极大值抑制"""
+        if not masks:
+            return masks, scores
+        
+        # 按分数排序
+        indices = np.argsort(scores)[::-1]
+        
+        keep_masks = []
+        keep_scores = []
+        
+        while len(indices) > 0:
+            # 保留当前最高分的掩码
+            current_idx = indices[0]
+            keep_masks.append(masks[current_idx])
+            keep_scores.append(scores[current_idx])
+            
+            if len(indices) == 1:
+                break
+            
+            # 计算当前掩码与其他掩码的IoU
+            current_mask = masks[current_idx]
+            remove_indices = [0]  # 包括当前索引
+            
+            for i in range(1, len(indices)):
+                other_idx = indices[i]
+                other_mask = masks[other_idx]
+                
+                # 计算IoU
+                intersection = np.logical_and(current_mask, other_mask).sum()
+                union = np.logical_or(current_mask, other_mask).sum()
+                iou = intersection / union if union > 0 else 0
+                
+                # 如果IoU超过阈值，标记为删除
+                if iou > iou_threshold:
+                    remove_indices.append(i)
+            
+            # 删除重叠的掩码
+            indices = np.delete(indices, remove_indices)
+        
+        return keep_masks, keep_scores
+
+    # 修改 _detect_auto_mode_refined 方法，减少过度分割
+    def _detect_auto_mode_refined_fixed(self, img: np.ndarray) -> List[Dict]:
+        """修复的auto检测：减少过度分割"""
+        logging.info("使用优化的auto检测...")
+        
+        # 计算合理的面积范围
+        img_area = img.shape[0] * img.shape[1]
+        well_area = img_area / 96  # 平均每个孔的面积
+        
+        # 菌落应该占孔面积的20%-80%
+        min_colony_area = int(well_area * 0.2)
+        max_colony_area = int(well_area * 0.8)
+        
+        # 关键修改：调整SAM参数以减少过度分割
+        sam_params_override = {
+            "points_per_side": 32,  # 从128减少到32
+            "pred_iou_thresh": 0.88,  # 提高阈值
+            "stability_score_thresh": 0.85,  # 提高稳定性阈值
+            "min_mask_region_area": min_colony_area,  # 直接使用最小菌落面积
+            "crop_n_layers": 0,  # 禁用crop以减少重复检测
+        }
+        
+        # 临时更新SAM参数
+        original_params = self.sam_model.params.copy()
+        self.sam_model.params.update(sam_params_override)
+        
+        try:
+            masks, scores = self.sam_model.segment_everything(
+                img, min_area=min_colony_area, max_area=max_colony_area
+            )
+            
+            logging.info(f"SAM返回 {len(masks)} 个候选掩码")
+            
+            colonies = []
+            for i, (mask, score) in enumerate(zip(masks, scores)):
+                colony_data = self._extract_colony_data(
+                    img, mask, f"colony_{i}", "sam_auto"
+                )
+                
+                if colony_data:
+                    colony_data["sam_score"] = float(score)
+                    colonies.append(colony_data)
+            
+            return colonies
+            
+        finally:
+            # 恢复原始参数
             self.sam_model.params = original_params
     def _calculate_mask_overlap(self, mask1: np.ndarray, mask2: np.ndarray) -> float:
         """计算两个掩码的重叠度（IoU）"""
@@ -1667,11 +1846,11 @@ class ColonyDetector:
     # post_process
 
     def _post_process_colonies(self, colonies: List[Dict]) -> List[Dict]:
-        """后处理菌落列表 - 增强版"""
+        """后处理菌落列表 - 改进版"""
         if not colonies:
             return colonies
 
-        # 原有的验证逻辑
+        # 1. 原有的验证逻辑
         valid_colonies = []
         for colony in colonies:
             is_valid, error_msg = DataValidator.validate_colony(colony)
@@ -1680,12 +1859,20 @@ class ColonyDetector:
             else:
                 logging.debug(f"移除无效菌落: {error_msg}")
 
-        # 【新增】计算质量分数（如果还没有）
+        # 2. 计算质量分数（如果还没有）
         for colony in valid_colonies:
             if "quality_score" not in colony:
                 self._quality_score_adjustment(colony)
 
-        # 【新增】根据质量分数过滤（可选）
+        # ===== 关键修改：在质量过滤之前先尝试合并 =====
+        
+        # 3. 【新增】先尝试合并距离很近的菌落（处理过度分割）
+        if len(valid_colonies) > 100:  # 如果菌落数量异常多
+            logging.info(f"检测到较多菌落({len(valid_colonies)})，尝试合并邻近菌落")
+            valid_colonies = self._merge_nearby_colonies(valid_colonies)
+            logging.info(f"合并后: {len(valid_colonies)} 个菌落")
+        
+        # 4. 根据质量分数过滤
         if hasattr(self.config, "min_quality_score"):
             min_score = self.config.min_quality_score
             quality_filtered = [
@@ -1698,28 +1885,41 @@ class ColonyDetector:
                 )
                 valid_colonies = quality_filtered
 
-        # 过滤重叠菌落（使用质量分数改进优先级）
+        # 5. 【修改】处理重叠菌落 - 优先合并，然后过滤
         if self.config.merge_overlapping and len(valid_colonies) > 1:
-            valid_colonies = self._filter_overlapping_colonies_by_quality(
-                valid_colonies
-            )
+            # 先尝试合并重叠的菌落
+            if self.config.enable_duplicate_merging:
+                original_count = len(valid_colonies)
+                valid_colonies = self._merge_overlapping_colonies(valid_colonies)
+                if len(valid_colonies) < original_count:
+                    logging.info(f"合并重叠菌落: {original_count} -> {len(valid_colonies)}")
+            
+            # 如果还有重叠，再过滤
+            valid_colonies = self._filter_overlapping_colonies_by_quality(valid_colonies)
 
-        # ------- Ensure at most one colony per well position -------
+        # 6. 确保每个孔位只有一个菌落
         well_best: Dict[str, Tuple[float, Dict]] = {}
         unmapped: List[Dict] = []
+        
         for colony in valid_colonies:
             well_id = colony.get("well_position", "")
             score = colony.get("quality_score", colony.get("sam_score", 0.0))
+            
             if not well_id or well_id.startswith("unmapped"):
                 unmapped.append(colony)
                 continue
-            if (
-                well_id not in well_best
-                or score > well_best[well_id][0]
-            ):
+                
+            if well_id not in well_best or score > well_best[well_id][0]:
+                # 【新增】如果要替换，尝试合并信息
+                if well_id in well_best and self.config.enable_duplicate_merging:
+                    # 合并两个菌落的信息
+                    existing_colony = well_best[well_id][1]
+                    colony = self._merge_colony_info(existing_colony, colony)
+                
                 well_best[well_id] = (score, colony)
 
         deduped_colonies = [c for _, c in well_best.values()] + unmapped
+        
         if len(deduped_colonies) < len(valid_colonies):
             logging.info(
                 f"按孔位唯一化: {len(valid_colonies)} -> {len(deduped_colonies)}"
@@ -2062,6 +2262,182 @@ class ColonyDetector:
         }
 
         return colony["quality_score"]
+
+    def _merge_nearby_colonies(self, colonies: List[Dict], 
+                            distance_threshold: float = 50.0) -> List[Dict]:
+        """合并距离很近的菌落（基于质心距离）"""
+        if len(colonies) <= 1:
+            return colonies
+        
+        # 计算所有菌落的质心
+        centroids = []
+        for colony in colonies:
+            centroid = colony.get('centroid')
+            if centroid:
+                centroids.append(centroid)
+            else:
+                centroids.append(None)
+        
+        # 构建合并组
+        merged_groups = []
+        used = set()
+        
+        for i in range(len(colonies)):
+            if i in used or centroids[i] is None:
+                continue
+                
+            group = [i]
+            used.add(i)
+            
+            # 找到所有距离小于阈值的菌落
+            for j in range(i + 1, len(colonies)):
+                if j in used or centroids[j] is None:
+                    continue
+                    
+                dist = np.sqrt(
+                    (centroids[i][0] - centroids[j][0])**2 + 
+                    (centroids[i][1] - centroids[j][1])**2
+                )
+                
+                if dist < distance_threshold:
+                    group.append(j)
+                    used.add(j)
+            
+            merged_groups.append(group)
+        
+        # 合并每组菌落
+        merged_colonies = []
+        
+        for group in merged_groups:
+            if len(group) == 1:
+                merged_colonies.append(colonies[group[0]])
+            else:
+                # 合并多个菌落
+                merged_colony = self._merge_multiple_colonies([colonies[idx] for idx in group])
+                merged_colonies.append(merged_colony)
+                logging.debug(f"合并了 {len(group)} 个邻近菌落")
+        
+        return merged_colonies
+
+    def _merge_overlapping_colonies(self, colonies: List[Dict], 
+                                overlap_threshold: float = 0.3) -> List[Dict]:
+        """合并重叠的菌落（基于边界框IoU）"""
+        if len(colonies) <= 1:
+            return colonies
+        
+        # 按质量分数排序
+        sorted_colonies = sorted(
+            colonies, 
+            key=lambda x: x.get('quality_score', x.get('sam_score', 0)), 
+            reverse=True
+        )
+        
+        merged = []
+        used = set()
+        
+        for i, colony1 in enumerate(sorted_colonies):
+            if i in used:
+                continue
+                
+            # 查找所有与当前菌落重叠的
+            overlap_group = [i]
+            bbox1 = colony1.get('bbox')
+            
+            for j, colony2 in enumerate(sorted_colonies[i+1:], i+1):
+                if j in used or not bbox1:
+                    continue
+                    
+                bbox2 = colony2.get('bbox')
+                if bbox2:
+                    iou = self._calculate_bbox_overlap(bbox1, bbox2)
+                    if iou > overlap_threshold:
+                        overlap_group.append(j)
+                        used.add(j)
+            
+            if len(overlap_group) > 1:
+                # 合并重叠的菌落
+                merged_colony = self._merge_multiple_colonies(
+                    [sorted_colonies[idx] for idx in overlap_group]
+                )
+                merged.append(merged_colony)
+            else:
+                merged.append(colony1)
+            
+            used.add(i)
+        
+        return merged
+
+    def _merge_multiple_colonies(self, colonies: List[Dict]) -> Dict:
+        """合并多个菌落的信息"""
+        if not colonies:
+            return {}
+        
+        if len(colonies) == 1:
+            return colonies[0].copy()
+        
+        # 选择质量分数最高的作为基础
+        base_colony = max(
+            colonies, 
+            key=lambda x: x.get('quality_score', x.get('sam_score', 0))
+        ).copy()
+        
+        # 合并掩码
+        if all('mask' in c for c in colonies):
+            combined_mask = np.zeros_like(colonies[0]['mask'], dtype=bool)
+            for colony in colonies:
+                combined_mask = np.logical_or(combined_mask, colony['mask'])
+            base_colony['mask'] = combined_mask.astype(np.uint8)
+        
+        # 更新面积
+        if 'mask' in base_colony:
+            base_colony['area'] = float(np.sum(base_colony['mask']))
+        else:
+            # 使用所有菌落面积之和
+            base_colony['area'] = sum(c.get('area', 0) for c in colonies)
+        
+        # 重新计算质心
+        if all('centroid' in c for c in colonies):
+            areas = [c.get('area', 1) for c in colonies]
+            total_area = sum(areas)
+            weighted_y = sum(c['centroid'][0] * a for c, a in zip(colonies, areas))
+            weighted_x = sum(c['centroid'][1] * a for c, a in zip(colonies, areas))
+            base_colony['centroid'] = (weighted_y / total_area, weighted_x / total_area)
+        
+        # 更新边界框
+        if all('bbox' in c for c in colonies):
+            all_minr = min(c['bbox'][0] for c in colonies)
+            all_minc = min(c['bbox'][1] for c in colonies)
+            all_maxr = max(c['bbox'][2] for c in colonies)
+            all_maxc = max(c['bbox'][3] for c in colonies)
+            base_colony['bbox'] = (all_minr, all_minc, all_maxr, all_maxc)
+        
+        # 记录合并信息
+        base_colony['merged_from'] = len(colonies)
+        base_colony['detection_methods'] = list(set(
+            c.get('detection_method', 'unknown') for c in colonies
+        ))
+        
+        return base_colony
+
+    def _merge_colony_info(self, colony1: Dict, colony2: Dict) -> Dict:
+        """合并两个菌落的信息，保留更好的数据"""
+        # 使用质量分数更高的作为基础
+        if colony1.get('quality_score', 0) >= colony2.get('quality_score', 0):
+            base = colony1.copy()
+            other = colony2
+        else:
+            base = colony2.copy()
+            other = colony1
+        
+        # 合并缺失的信息
+        for key, value in other.items():
+            if key not in base or base[key] is None:
+                base[key] = value
+        
+        return base
+
+
+
     def _extract_colonies_from_mask(self, img: np.ndarray, mask: np.ndarray, mode: str):
         """
         从单个mask中按连通区域分离菌落，与原detect接口格式兼容。

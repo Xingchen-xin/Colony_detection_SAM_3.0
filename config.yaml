@@ -24,7 +24,6 @@ detection:
   high_quality_threshold: 0.85
   supplementary_threshold: 0.5
   shape_regularity_min: 0.15
-  duplicate_centroid_threshold: 15.0
   duplicate_overlap_threshold: 0.5
   enable_duplicate_merging: true
   enable_adaptive_grid: true
@@ -41,12 +40,15 @@ detection:
   max_aspect_ratio: 3.0
   growth_inhibited_ratio: 0.30
   solidity_threshold: 0.70
+  enable_duplicate_merging: true  # 启用合并
+  duplicate_centroid_threshold: 50.0  # 质心距离阈值
+  overlap_threshold: 0.3  # 重叠阈值
 
 sam:
-  points_per_side: 128            # 每边采样点数
-  pred_iou_thresh: 0.85          # IoU阈值
-  stability_score_thresh: 0.75   # 稳定性分数阈值
-  min_mask_region_area: 100      # 最小掩码区域面积
+  points_per_side: 32            # 每边采样点数
+  pred_iou_thresh: 0.90          # IoU阈值
+  stability_score_thresh: 0.95   # 稳定性分数阈值
+  min_mask_region_area: 2000      # 最小掩码区域面积
   crop_n_layers: 1               # 裁剪层数
   crop_n_points_downscale_factor: 1  # 下采样因子
 
