@@ -1522,6 +1522,81 @@ class AnalysisPipeline:
             cd["sam_score"] = 1.0
             cols.append(cd)
         return cols
+    
+    def _detect_96plate_simple(self, img_rgb):
+        """简单的96孔板网格检测"""
+        logging.info("执行简单的96孔板网格检测")
+        
+        # 获取网格信息
+        if not hasattr(self.config, 'plate_grid') or not self.config.plate_grid:
+            rows = getattr(self.args, "rows", 8)
+            cols = getattr(self.args, "cols", 12)
+            self.config.plate_grid = self.detector._create_plate_grid(
+                img_rgb.shape[:2], rows, cols
+            )
+        
+        plate_grid = self.config.plate_grid
+        colonies = []
+        
+        # 方法1：使用网格中心点作为提示进行检测
+        for well_id, info in plate_grid.items():
+            cy, cx = info["center"]
+            try:
+                # 使用点提示检测
+                mask, score = self.detector.segment_with_prompts(
+                    img_rgb, 
+                    points=[[int(cx), int(cy)]], 
+                    point_labels=[1]
+                )
+                
+                if score > 0.5 and np.sum(mask) > self.config.detection.min_colony_area:
+                    colony_data = self.detector._extract_colony_data(
+                        img_rgb, mask, well_id, "grid_simple"
+                    )
+                    if colony_data:
+                        colony_data["well_position"] = well_id
+                        colony_data["sam_score"] = float(score)
+                        colony_data["forced_96plate"] = True
+                        colonies.append(colony_data)
+            except Exception as e:
+                logging.debug(f"网格检测 {well_id} 失败: {e}")
+                continue
+        
+        # 方法2：如果网格检测结果太少，使用auto模式补充
+        if len(colonies) < 50:  # 如果检测到的菌落太少
+            logging.info("网格检测结果不足，使用auto模式补充")
+            auto_colonies = self.detector.detect(img_rgb, mode="auto")
+            
+            # 将auto检测的菌落映射到最近的空孔位
+            used_wells = {c["well_position"] for c in colonies}
+            
+            for auto_colony in auto_colonies:
+                # 找到最近的未使用孔位
+                best_well = None
+                min_distance = float('inf')
+                
+                if 'centroid' in auto_colony:
+                    cy, cx = auto_colony['centroid']
+                    
+                    for well_id, info in plate_grid.items():
+                        if well_id in used_wells:
+                            continue
+                        
+                        wy, wx = info['center']
+                        distance = np.sqrt((cy - wy)**2 + (cx - wx)**2)
+                        
+                        if distance < min_distance and distance < info.get('search_radius', 100) * 2:
+                            min_distance = distance
+                            best_well = well_id
+                    
+                    if best_well:
+                        auto_colony["well_position"] = best_well
+                        auto_colony["forced_96plate"] = True
+                        colonies.append(auto_colony)
+                        used_wells.add(best_well)
+        
+        logging.info(f"简单网格检测完成: {len(colonies)} 个菌落")
+        return colonies
 
 
 

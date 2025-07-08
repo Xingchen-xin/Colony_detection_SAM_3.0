@@ -1,0 +1,17 @@
+=== 菌落分析报告 ===
+生成时间: 2025-07-08 15:21:10
+
+检测到的菌落总数: 96
+平均面积: 1167651.18
+面积范围: 7116.00 - 2465048.00
+检测模式: auto
+SAM模型: vit_b
+
+=== 表型分布 ===
+development_state:
+  substrate_mycelium: 88
+  early_aerial_mycelium: 8
+metabolite_production:
+  none: 96
+colony_morphology:
+  wrinkled: 96

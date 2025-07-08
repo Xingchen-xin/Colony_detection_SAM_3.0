@@ -1525,7 +1525,16 @@ class ColonyDetector:
         """增强菌落掩码形状 - 基于梯度 + 颜色的自适应膨胀"""
 
         if np.sum(mask) == 0:
-            return mask
+           return mask
+        # 确保mask和img形状匹配
+        if mask.shape[:2] != img.shape[:2]:
+            logging.warning(f"掩码形状 {mask.shape} 与图像形状 {img.shape} 不匹配")
+            # 调整掩码大小
+            import cv2
+            mask = cv2.resize(mask.astype(np.uint8), 
+                            (img.shape[1], img.shape[0]), 
+                            interpolation=cv2.INTER_NEAREST)
+
 
         # 1. 对原始 mask 做一次形态学闭运算，填补内部小孔洞
         kernel_close = cv2.getStructuringElement(
