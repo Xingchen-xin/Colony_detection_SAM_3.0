@@ -45,11 +45,11 @@ detection:
   overlap_threshold: 0.3  # 重叠阈值
 
 sam:
-  points_per_side: 32            # 每边采样点数
+  points_per_side: 64            # 每边采样点数
   pred_iou_thresh: 0.90          # IoU阈值
   stability_score_thresh: 0.95   # 稳定性分数阈值
   min_mask_region_area: 2000      # 最小掩码区域面积
-  crop_n_layers: 1               # 裁剪层数
+  crop_n_layers: 3               # 裁剪层数
   crop_n_points_downscale_factor: 1  # 下采样因子
 
 analysis:

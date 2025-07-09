@@ -228,7 +228,7 @@ class AnalysisPipeline:
         # Skip perspective correction since the image is not a chessboard
         return img_rgb
     def _self_calibrate_grid(self, centroids, rows: int, cols: int):
-        """基于菌落质心推断96孔板网格布局"""
+        """修复版本：解决广播错误"""
         import numpy as np
         import cv2
 
@@ -238,73 +238,69 @@ class AnalysisPipeline:
 
         pts = np.array(centroids, dtype=np.float32)
         if len(pts) < 8:
-            logging.warning(f"质心数量({len(pts)})不足，无法可靠自校准网格，使用静态网格")
+            logging.warning(f"质心数量({len(pts)})不足，无法可靠自校准网格")
             return False
 
         try:
-            # K-means聚类参数
             criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1.0)
             
-            # 对Y坐标(行)进行聚类
-            _, labels_y, centers_y = cv2.kmeans(
-                pts[:, 0].reshape(-1, 1),
-                rows,
-                None,
-                criteria,
-                10,
-                cv2.KMEANS_RANDOM_CENTERS
-            )
-            row_centers = sorted(centers_y.ravel())
-
-            # 对X坐标(列)进行聚类  
-            _, labels_x, centers_x = cv2.kmeans(
-                pts[:, 1].reshape(-1, 1),
-                cols,
-                None,
-                criteria,
-                10,
-                cv2.KMEANS_RANDOM_CENTERS
-            )
-            col_centers = sorted(centers_x.ravel())
-
-            # 估算搜索半径 - 修复：使用更合理的计算方式
-            dy = np.mean(np.diff(row_centers)) if len(row_centers) > 1 else 100
-            dx = np.mean(np.diff(col_centers)) if len(col_centers) > 1 else 100
+            # 🔥 关键修复：确保数据格式正确
+            # 提取Y坐标进行行聚类
+            y_coords = pts[:, 0].reshape(-1, 1).astype(np.float32)
+            logging.debug(f"Y坐标形状: {y_coords.shape}")
             
-            # 搜索半径应该是单元格间距的40-50%，确保有足够的覆盖
-            est_r = float(max(dx, dy) * 0.65)  # 使用45%的单元格间距
-            est_r = max(est_r, 80.0)  # 最小半径50像素（原来是30）
+            ret_y, labels_y, centers_y = cv2.kmeans(
+                y_coords, rows, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS
+            )
             
-            logging.info(f"网格间距: dx={dx:.1f}, dy={dy:.1f}")
-            logging.info(f"计算的搜索半径: {est_r:.1f}")
+            if centers_y is None or len(centers_y) != rows:
+                logging.warning("Y坐标聚类失败")
+                return False
+                
+            row_centers = sorted(centers_y.flatten())
 
-            # 构建网格字典
+            # 提取X坐标进行列聚类  
+            x_coords = pts[:, 1].reshape(-1, 1).astype(np.float32)
+            logging.debug(f"X坐标形状: {x_coords.shape}")
+            
+            ret_x, labels_x, centers_x = cv2.kmeans(
+                x_coords, cols, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS
+            )
+            
+            if centers_x is None or len(centers_x) != cols:
+                logging.warning("X坐标聚类失败")
+                return False
+                
+            col_centers = sorted(centers_x.flatten())
+
+            # 计算网格参数
+            dy = np.mean(np.diff(row_centers)) if len(row_centers) > 1 else 120
+            dx = np.mean(np.diff(col_centers)) if len(col_centers) > 1 else 120
+            search_radius = max(dx, dy) * 0.35  # 减小搜索半径
+            search_radius = np.clip(search_radius, 30.0, 100.0)
+            
+            # 构建网格
             plate_grid = {}
-            cell_h = dy
-            cell_w = dx
-            
             for i, y in enumerate(row_centers):
                 for j, x in enumerate(col_centers):
                     well_id = f"{chr(65 + i)}{j+1}"
                     plate_grid[well_id] = {
                         "center": (float(y), float(x)),
-                        "search_radius": est_r,
+                        "search_radius": float(search_radius),
                         "row": i,
                         "col": j,
                         "expected_bbox": (
-                            int(y - cell_h / 2),
-                            int(x - cell_w / 2),
-                            int(y + cell_h / 2),
-                            int(x + cell_w / 2),
+                            int(y - dy/2), int(x - dx/2),
+                            int(y + dy/2), int(x + dx/2)
                         ),
                     }
 
             self.config.plate_grid = plate_grid
-            logging.info(f"自校准网格完成: {len(row_centers)}行 x {len(col_centers)}列, 搜索半径={est_r:.1f}")
+            logging.info(f"网格校准成功: {rows}x{cols}, 搜索半径={search_radius:.1f}")
             return True
             
         except Exception as e:
-            logging.error(f"网格自校准失败: {e}")
+            logging.error(f"网格校准失败: {e}")
             return False
 
     def run(self):
@@ -777,40 +773,42 @@ class AnalysisPipeline:
         return forced_colonies
     # 简化 _force_96plate_detection 方法
     def _force_96plate_detection_simplified(self, img_rgb):
-        """简化的强制96孔板检测"""
-        logging.info("使用简化的强制96孔板检测")
+        """修复版本：不强制填充空孔位"""
+        logging.info("使用改进的强制96孔板检测")
         
-        # 直接使用网格检测
+        # 使用改进的检测方法
         colonies = self._detect_96plate_simple(img_rgb)
         
-        # 为未检测到菌落的孔位创建占位符
         detected_wells = {c["well_position"] for c in colonies}
-        all_wells = set()
+        total_wells = 96
+        empty_count = total_wells - len(detected_wells)
         
-        rows, cols = 8, 12
-        row_labels = [chr(65 + i) for i in range(rows)]
-        for r in range(rows):
-            for c in range(cols):
-                all_wells.add(f"{row_labels[r]}{c+1}")
+        # 🔥 关键：默认不填充空孔位
+        fallback_policy = getattr(self.args, "fallback_null_policy", "skip")
         
-        empty_wells = all_wells - detected_wells
-        
-        # 根据策略处理空孔位
-        if self.args.fallback_null_policy == "fill":
+        if fallback_policy == "fill" and empty_count > 0:
+            logging.info(f"根据策略填充 {empty_count} 个空孔位")
+            # 只有明确要求填充时才填充
+            all_wells = set()
+            for r in range(8):
+                for c in range(12):
+                    all_wells.add(f"{chr(65 + r)}{c+1}")
+            
+            empty_wells = all_wells - detected_wells
             for well_id in empty_wells:
-                # 创建推测的菌落条目
-                inferred_colony = {
-                    "id": f"inferred_{well_id}",
+                empty_colony = {
+                    "id": f"empty_{well_id}",
                     "well_position": well_id,
                     "area": 0.0,
                     "colony_status": "empty",
                     "is_null": True,
                     "forced_96plate": True,
                     "sam_score": 0.0,
+                    "detection_method": "empty_placeholder"
                 }
-                colonies.append(inferred_colony)
+                colonies.append(empty_colony)
         
-        logging.info(f"检测到 {len(detected_wells)} 个菌落，{len(empty_wells)} 个空孔位")
+        logging.info(f"最终结果: {len(detected_wells)} 个菌落，{empty_count} 个空孔位")
         return colonies
 
     def _save_96plate_visualization(self, img_rgb, well_to_colony, plate_grid, empty_wells):
@@ -1524,10 +1522,9 @@ class AnalysisPipeline:
         return cols
     
     def _detect_96plate_simple(self, img_rgb):
-        """简单的96孔板网格检测"""
-        logging.info("执行简单的96孔板网格检测")
+        """真正改进的96孔板检测 - 会拒绝空孔位"""
+        logging.info("执行改进的96孔板网格检测")
         
-        # 获取网格信息
         if not hasattr(self.config, 'plate_grid') or not self.config.plate_grid:
             rows = getattr(self.args, "rows", 8)
             cols = getattr(self.args, "cols", 12)
@@ -1538,9 +1535,21 @@ class AnalysisPipeline:
         plate_grid = self.config.plate_grid
         colonies = []
         
-        # 方法1：使用网格中心点作为提示进行检测
-        for well_id, info in plate_grid.items():
+        # 统计检测结果
+        stats = {
+            "high_quality": 0,
+            "medium_quality": 0, 
+            "rejected_empty": 0,
+            "rejected_low_score": 0,
+            "rejected_small_area": 0,
+            "failed": 0
+        }
+        
+        min_area = self.config.detection.min_colony_area
+        
+        for well_id, info in tqdm(plate_grid.items(), desc="改进网格检测", ncols=80):
             cy, cx = info["center"]
+            
             try:
                 # 使用点提示检测
                 mask, score = self.detector.segment_with_prompts(
@@ -1549,54 +1558,179 @@ class AnalysisPipeline:
                     point_labels=[1]
                 )
                 
-                if score > 0.5 and np.sum(mask) > self.config.detection.min_colony_area:
-                    colony_data = self.detector._extract_colony_data(
-                        img_rgb, mask, well_id, "grid_simple"
-                    )
-                    if colony_data:
-                        colony_data["well_position"] = well_id
-                        colony_data["sam_score"] = float(score)
-                        colony_data["forced_96plate"] = True
-                        colonies.append(colony_data)
+                area = np.sum(mask)
+                
+                # 🔥 第一层过滤：SAM分数
+                if score < 0.5:
+                    stats["rejected_low_score"] += 1
+                    logging.debug(f"{well_id}: SAM分数过低 {score:.3f}")
+                    continue
+                
+                # 🔥 第二层过滤：面积检查
+                if area < min_area * 0.3:  # 面积太小
+                    stats["rejected_small_area"] += 1
+                    logging.debug(f"{well_id}: 面积过小 {area}")
+                    continue
+                
+                # 🔥 第三层过滤：空孔位检测（最关键）
+                if self._is_empty_well_by_color_analysis(mask, img_rgb, (cy, cx)):
+                    stats["rejected_empty"] += 1
+                    logging.debug(f"{well_id}: 检测为空孔位")
+                    continue
+                
+                # 🔥 第四层过滤：形状合理性
+                if not self._is_reasonable_colony_shape_simple(mask):
+                    stats["rejected_empty"] += 1
+                    logging.debug(f"{well_id}: 形状不合理")
+                    continue
+                
+                # 通过所有检查，创建菌落
+                colony_data = self.detector._extract_colony_data(
+                    img_rgb, mask, well_id, "grid_validated"
+                )
+                
+                if colony_data:
+                    # 计算质量分数
+                    quality = self._calculate_colony_quality(mask, score, area, min_area)
+                    
+                    colony_data["well_position"] = well_id
+                    colony_data["sam_score"] = float(score)
+                    colony_data["quality_score"] = quality
+                    colony_data["forced_96plate"] = True
+                    colonies.append(colony_data)
+                    
+                    if quality > 0.7:
+                        stats["high_quality"] += 1
+                    else:
+                        stats["medium_quality"] += 1
+                        
+                    logging.debug(f"{well_id}: ✓ 检测成功 (分数={score:.3f}, 面积={area}, 质量={quality:.3f})")
+                    
             except Exception as e:
-                logging.debug(f"网格检测 {well_id} 失败: {e}")
+                stats["failed"] += 1
+                logging.debug(f"{well_id}: 检测失败 {e}")
                 continue
         
-        # 方法2：如果网格检测结果太少，使用auto模式补充
-        if len(colonies) < 50:  # 如果检测到的菌落太少
-            logging.info("网格检测结果不足，使用auto模式补充")
-            auto_colonies = self.detector.detect(img_rgb, mode="auto")
-            
-            # 将auto检测的菌落映射到最近的空孔位
-            used_wells = {c["well_position"] for c in colonies}
-            
-            for auto_colony in auto_colonies:
-                # 找到最近的未使用孔位
-                best_well = None
-                min_distance = float('inf')
-                
-                if 'centroid' in auto_colony:
-                    cy, cx = auto_colony['centroid']
-                    
-                    for well_id, info in plate_grid.items():
-                        if well_id in used_wells:
-                            continue
-                        
-                        wy, wx = info['center']
-                        distance = np.sqrt((cy - wy)**2 + (cx - wx)**2)
-                        
-                        if distance < min_distance and distance < info.get('search_radius', 100) * 2:
-                            min_distance = distance
-                            best_well = well_id
-                    
-                    if best_well:
-                        auto_colony["well_position"] = best_well
-                        auto_colony["forced_96plate"] = True
-                        colonies.append(auto_colony)
-                        used_wells.add(best_well)
-        
-        logging.info(f"简单网格检测完成: {len(colonies)} 个菌落")
+        logging.info(f"检测统计: {stats}")
+        logging.info(f"有效菌落: {len(colonies)}/96")
         return colonies
+
+
+    def _is_empty_well_by_color_analysis(self, mask, img_rgb, center):
+        """通过颜色分析判断是否为空孔位 - 核心方法"""
+        try:
+            # 获取掩码区域的像素
+            mask_pixels = img_rgb[mask > 0]
+            if len(mask_pixels) == 0:
+                return True
+            
+            # 1. 颜色标准差检查（空孔位颜色较均匀）
+            color_std = np.std(mask_pixels, axis=0)
+            avg_std = np.mean(color_std)
+            if avg_std < 8:  # 颜色太均匀，可能是空孔位
+                logging.debug(f"颜色标准差过低: {avg_std:.2f}")
+                return True
+            
+            # 2. 与周围背景的颜色差异
+            cy, cx = int(center[0]), int(center[1])
+            h, w = img_rgb.shape[:2]
+            
+            # 采样周围背景点
+            bg_points = []
+            radius = 40
+            for angle in np.linspace(0, 2*np.pi, 8, endpoint=False):
+                bg_y = int(cy + radius * np.sin(angle))
+                bg_x = int(cx + radius * np.cos(angle))
+                if 0 <= bg_y < h and 0 <= bg_x < w:
+                    bg_points.append(img_rgb[bg_y, bg_x])
+            
+            if bg_points:
+                bg_color = np.mean(bg_points, axis=0)
+                mask_color = np.mean(mask_pixels, axis=0)
+                color_distance = np.linalg.norm(bg_color - mask_color)
+                
+                if color_distance < 15:  # 与背景太相似
+                    logging.debug(f"与背景颜色太相似: 距离={color_distance:.2f}")
+                    return True
+            
+            # 3. 检查是否主要是培养基颜色（红褐色）
+            # 从图片看，空孔位主要是红褐色培养基
+            mean_color = np.mean(mask_pixels, axis=0)
+            r, g, b = mean_color
+            
+            # 红褐色培养基特征：R > G > B, 且整体较暗
+            if (r > g > b and r > 100 and g < r * 0.8 and b < g * 0.8 and 
+                np.mean(mean_color) < 120):  # 整体较暗
+                logging.debug(f"检测为培养基颜色: RGB=({r:.1f}, {g:.1f}, {b:.1f})")
+                return True
+            
+            # 4. 亮度检查 - 菌落通常比空孔位更亮
+            brightness = np.mean(mask_pixels)
+            if brightness < 80:  # 太暗，可能是空孔位
+                logging.debug(f"亮度过低: {brightness:.2f}")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logging.debug(f"空孔位检测出错: {e}")
+            return False
+
+
+    def _is_reasonable_colony_shape_simple(self, mask):
+        """简化的形状合理性检查"""
+        try:
+            contours, _ = cv2.findContours(
+                mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            
+            if not contours:
+                return False
+            
+            main_contour = max(contours, key=cv2.contourArea)
+            area = cv2.contourArea(main_contour)
+            
+            if area < 100:  # 太小
+                return False
+            
+            # 计算圆形度
+            perimeter = cv2.arcLength(main_contour, True)
+            if perimeter == 0:
+                return False
+            
+            circularity = 4 * np.pi * area / (perimeter * perimeter)
+            
+            # 菌落应该相对圆形
+            if circularity < 0.2:  # 太不规则
+                return False
+            
+            return True
+            
+        except Exception:
+            return False
+
+
+    def _calculate_colony_quality(self, mask, sam_score, area, min_area):
+        """计算菌落质量分数"""
+        # SAM分数权重
+        score_weight = sam_score * 0.4
+        
+        # 面积权重
+        if area >= min_area:
+            area_weight = 0.4
+        elif area >= min_area * 0.5:
+            area_weight = 0.3
+        else:
+            area_weight = 0.2
+        
+        # 形状权重
+        try:
+            regularity = self.detector._calculate_shape_regularity(mask)
+            shape_weight = regularity * 0.2
+        except:
+            shape_weight = 0.1
+        
+        return min(score_weight + area_weight + shape_weight, 1.0)
 
 
 

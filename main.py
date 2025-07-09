@@ -131,7 +131,7 @@ def parse_arguments():
     parser.add_argument("--rows", type=int, default=8, help="孔板行数 (默认: 8)")
     parser.add_argument("--cols", type=int, default=12, help="孔板列数 (默认: 12)")
     parser.add_argument("--force-96plate-detection", action="store_true", help="是否强制使用96孔板布局进行检测")
-    parser.add_argument("--fallback-null-policy", type=str, default="fill", choices=["fill", "null", "skip"], help="未检测到菌落时的处理策略")
+    parser.add_argument("--fallback-null-policy", type=str, default="skip", choices=["fill", "null", "skip"], help="未检测到菌落时的处理策略")
     parser.add_argument("--outlier-detection", action="store_true", help="是否启用离群值检测")
     parser.add_argument("--outlier-metric", type=str, default="area", help="离群值检测使用的指标 (如 area/intensity/shape_metric)")
     parser.add_argument("--outlier-threshold", type=float, default=3.0, help="离群值检测的Z-score阈值")

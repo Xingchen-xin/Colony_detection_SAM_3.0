@@ -1,0 +1,13 @@
+Total colonies: 8
+Average area: 2448975.62
+Area range: 2401203.00 - 2469039.00
+
+Colonies per well:
+  E11: 1
+  F3: 1
+  H11: 1
+  H12: 1
+  H2: 1
+  H3: 1
+  H4: 1
+  H9: 1
