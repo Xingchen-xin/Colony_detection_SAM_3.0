@@ -22,6 +22,11 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     SegFormerSegmenter = None
 
+try:
+    from colony_analysis.segmenters.yolo_sam_segmenter import YoloSamSegmenter
+except Exception:  # pragma: no cover - optional dependency
+    YoloSamSegmenter = None
+
 
 def load_model(cfg: Dict[str, Any]):
     name = (cfg.get("name") or cfg.get("model"))
@@ -43,6 +48,19 @@ def load_model(cfg: Dict[str, Any]):
             raise ImportError("SegFormerSegmenter not available")
         threshold = float(cfg.get("threshold", 0.5))
         return SegFormerSegmenter(weights=weights, threshold=threshold)
+    if name in ("yolo_sam", "yolo+sam", "yolosam"):
+        if YoloSamSegmenter is None:
+            raise ImportError("YoloSamSegmenter not available (pip install ultralytics)")
+        yolo_weights = cfg.get("yolo_weights", "models/colony_yolo.pt")
+        sam_weights = weights or "models/sam_vit_b_01ec64.pth"
+        return YoloSamSegmenter(
+            yolo_weights=yolo_weights,
+            sam_checkpoint=sam_weights,
+            sam_model_type=cfg.get("variant", "vit_b"),
+            yolo_conf=float(cfg.get("yolo_conf", 0.25)),
+            yolo_iou=float(cfg.get("yolo_iou", 0.45)),
+            device=cfg.get("device"),
+        )
     raise ValueError(f"Unsupported model: {name}")
 
 
